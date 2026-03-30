@@ -1,0 +1,103 @@
+.DS_Store
+
+# Xcode
+#
+build/
+*.pbxuser
+!default.pbxuser
+*.mode1v3
+!default.mode1v3
+*.mode2v3
+!default.mode2v3
+*.perspectivev3
+!default.perspectivev3
+xcuserdata
+*.xccheckout
+*.moved-aside
+DerivedData
+*.hmap
+*.ipa
+*.xcuserstate
+
+# Android/IntelliJ
+#
+build/
+.idea
+.gradle
+local.properties
+*.iml
+android/.gradle/
+
+# node.js
+#
+/node_modules/
+node_modules
+npm-debug.log
+yarn-error.log
+
+# BUCK
+buck-out/
+\.buckd/
+*.keystore
+!debug.keystore
+
+# fastlane
+#
+# It is recommended to not store the screenshots in the git repo. Instead, use fastlane to re-generate the
+# screenshots whenever they are needed.
+# For more information about the recommended setup visit:
+# https://docs.fastlane.tools/best-practices/source-control/
+
+*/fastlane/report.xml
+*/fastlane/Preview.html
+*/fastlane/screenshots
+
+# Bundle artifact
+*.jsbundle
+*.hprof
+
+# Ruby / CocoaPods
+/ios/Pods/
+/vendor/bundle/
+
+android/java_pid3234.hprof
+android/*.hprof
+
+# Pod files
+/ios/Pods 
+# Environment files (IMPORTANT - secrets mat commit karo)
+.env
+.env.local
+.env.development
+.env.production
+.env.staging
+
+.yarn/cache
+.yarn/install-state.gz
+
+# Metro bundler cache
+.metro-health-check*
+
+# React Native
+ios/build/
+android/build/
+android/app/build/
+
+# Flipper
+ios/Pods/Headers/
+
+# Temporary files
+*.log
+*.orig
+*.bak
+
+# OS files
+Thumbs.db
+
+# Xcode local env (machine-specific paths)
+ios/.xcode.env.local
+
+# Google Services - agar repo public hai to zaroor ignore karo
+# android/app/google-services.json
+# ios/GoogleService-Info.plist
+android/app/google-services-original.json

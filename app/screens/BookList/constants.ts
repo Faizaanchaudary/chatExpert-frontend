@@ -1,0 +1,11 @@
+export const IMAGE_HEIGHT = 100;
+export const IMAGE_WIDTH = 200;
+export const VIDEO_HEIGHT = 200;
+export const VIDEO_WIDTH = 200;
+export const AUDIO_HEIGHT = 70;
+export const BANNER_HEIGHT = 24;
+export const MESSAGE_MARGIN_VERTICAL = 8;
+export const MESSAGE_MARGIN_HORIZONTAL = 12;
+export const MESSAGE_PADDING_VERTICAL = 8;
+export const MESSAGE_PADDING_HORIZONTAL = 12;
+export const DEFAULT_FONT_SIZE = 12;

@@ -1,0 +1,48 @@
+{
+  "project_info": {
+    "project_number": "792192212412",
+    "project_id": "fokus-10679",
+    "storage_bucket": "fokus-10679.appspot.com"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:792192212412:android:86b1da7d6e1ca4b0e75fb9",
+        "android_client_info": {
+          "package_name": "com.chatexport"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAcoEe1OUXeVtJQl0SjVBrA5ss5pqC7XC8"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:792192212412:android:b00a8cfb587dee80e75fb9",
+        "android_client_info": {
+          "package_name": "com.fokusnative"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAcoEe1OUXeVtJQl0SjVBrA5ss5pqC7XC8"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

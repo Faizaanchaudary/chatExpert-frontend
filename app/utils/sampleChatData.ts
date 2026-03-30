@@ -1,0 +1,175 @@
+import {IMessage, MessageType} from '../interfaces/IMessage';
+import {IChat} from '../interfaces/IChat';
+
+// Sample conversation - A nostalgic chat between old friends
+export const SAMPLE_MESSAGES: IMessage[] = [
+  {
+    _id: 'msg_001',
+    text: 'Hey! Remember when we used to hang out at the old coffee shop?',
+    senderName: 'Sarah',
+    sendingTime: '10:30 AM',
+    date: '15/01/2025',
+    messageType: 'text' as MessageType,
+    chatId: 'sample-chat-001',
+    createdAt: '2025-01-15T10:30:00.000Z',
+    updatedAt: '2025-01-15T10:30:00.000Z',
+  },
+  {
+    _id: 'msg_002',
+    text: 'Of course! Those were the best days. The one with the amazing chai latte?',
+    senderName: 'Mike',
+    sendingTime: '10:32 AM',
+    date: '15/01/2025',
+    messageType: 'text' as MessageType,
+    chatId: 'sample-chat-001',
+    createdAt: '2025-01-15T10:32:00.000Z',
+    updatedAt: '2025-01-15T10:32:00.000Z',
+  },
+  {
+    _id: 'msg_003',
+    text: 'Yes! I still dream about their chocolate croissants',
+    senderName: 'Sarah',
+    sendingTime: '10:33 AM',
+    date: '15/01/2025',
+    messageType: 'text' as MessageType,
+    chatId: 'sample-chat-001',
+    createdAt: '2025-01-15T10:33:00.000Z',
+    updatedAt: '2025-01-15T10:33:00.000Z',
+  },
+  {
+    _id: 'msg_004',
+    text: 'We should go back sometime!',
+    senderName: 'Mike',
+    sendingTime: '10:35 AM',
+    date: '15/01/2025',
+    messageType: 'text' as MessageType,
+    chatId: 'sample-chat-001',
+    createdAt: '2025-01-15T10:35:00.000Z',
+    updatedAt: '2025-01-15T10:35:00.000Z',
+  },
+  {
+    _id: 'msg_005',
+    text: "I'd love that! How about this weekend?",
+    senderName: 'Sarah',
+    sendingTime: '10:36 AM',
+    date: '15/01/2025',
+    messageType: 'text' as MessageType,
+    chatId: 'sample-chat-001',
+    createdAt: '2025-01-15T10:36:00.000Z',
+    updatedAt: '2025-01-15T10:36:00.000Z',
+  },
+  {
+    _id: 'msg_006',
+    text: 'Perfect! Saturday morning works for me',
+    senderName: 'Mike',
+    sendingTime: '10:38 AM',
+    date: '15/01/2025',
+    messageType: 'text' as MessageType,
+    chatId: 'sample-chat-001',
+    createdAt: '2025-01-15T10:38:00.000Z',
+    updatedAt: '2025-01-15T10:38:00.000Z',
+  },
+  {
+    _id: 'msg_007',
+    text: "Can't wait! It's been too long since we caught up properly",
+    senderName: 'Sarah',
+    sendingTime: '10:40 AM',
+    date: '15/01/2025',
+    messageType: 'text' as MessageType,
+    chatId: 'sample-chat-001',
+    createdAt: '2025-01-15T10:40:00.000Z',
+    updatedAt: '2025-01-15T10:40:00.000Z',
+  },
+  {
+    _id: 'msg_008',
+    text: 'I know right? Life gets so busy sometimes',
+    senderName: 'Mike',
+    sendingTime: '10:42 AM',
+    date: '15/01/2025',
+    messageType: 'text' as MessageType,
+    chatId: 'sample-chat-001',
+    createdAt: '2025-01-15T10:42:00.000Z',
+    updatedAt: '2025-01-15T10:42:00.000Z',
+  },
+  {
+    _id: 'msg_009',
+    text: 'But friends like you make it worth taking a break',
+    senderName: 'Mike',
+    sendingTime: '10:42 AM',
+    date: '15/01/2025',
+    messageType: 'text' as MessageType,
+    chatId: 'sample-chat-001',
+    createdAt: '2025-01-15T10:42:30.000Z',
+    updatedAt: '2025-01-15T10:42:30.000Z',
+  },
+  {
+    _id: 'msg_010',
+    text: "Aww that's so sweet! See you Saturday then!",
+    senderName: 'Sarah',
+    sendingTime: '10:45 AM',
+    date: '15/01/2025',
+    messageType: 'text' as MessageType,
+    chatId: 'sample-chat-001',
+    createdAt: '2025-01-15T10:45:00.000Z',
+    updatedAt: '2025-01-15T10:45:00.000Z',
+  },
+];
+
+// Sample chat metadata
+export const SAMPLE_CHAT: IChat = {
+  _id: 'sample-chat-001',
+  platform: 'whatsapp',
+  totalMessages: SAMPLE_MESSAGES.length,
+  author: 'Sarah',
+  status: 'active',
+  importedAt: '2025-01-15T10:00:00.000Z',
+  mediaFiles: [],
+  createdAt: '2025-01-15T10:00:00.000Z',
+  updatedAt: '2025-01-15T10:45:00.000Z',
+  bookConfig: {
+    fontFamily: 'System',
+    fontSize: 12,
+    fontStyle: 'regular',
+    chatBackground: '#FDF8F0',
+    hideName: false,
+    senderBackground: '#4A6FA5',
+    senderTextColor: '#FFFFFF',
+    receiverBackground: '#F0EDE5',
+    receiverTextColor: '#3D3D3D',
+    dateFormat: 'DD/MM/YYYY hh:mm A',
+  },
+};
+
+// Page structure for the book display
+export const SAMPLE_PAGES = [
+  {
+    id: 'page-1',
+    messages: SAMPLE_MESSAGES.slice(0, 4),
+  },
+  {
+    id: 'page-2',
+    messages: SAMPLE_MESSAGES.slice(4, 7),
+  },
+  {
+    id: 'page-3',
+    messages: SAMPLE_MESSAGES.slice(7, 10),
+  },
+];
+
+// Spread structure for open book view
+export const SAMPLE_SPREADS = [
+  {
+    id: 'spread-1',
+    leftPage: SAMPLE_PAGES[0],
+    rightPage: SAMPLE_PAGES[1],
+    leftPageNumber: 1,
+    rightPageNumber: 2,
+  },
+  {
+    id: 'spread-2',
+    leftPage: SAMPLE_PAGES[2],
+    rightPage: null,
+    leftPageNumber: 3,
+    rightPageNumber: 4,
+  },
+];

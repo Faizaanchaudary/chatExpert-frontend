@@ -158,7 +158,7 @@ function detectMedia(messageText: string): {
   const vid = /(VID-[^\s]+\.(?:mp4))/i.exec(withoutSuffix);
   if (vid?.[1]) return { type: 'video', fileName: vid[1] };
 
-  const aud = /(AUD-[^\s]+\.(?:opus))/i.exec(withoutSuffix);
+  const aud = /((?:AUD|PTT)-[^\s]+\.(?:opus|mp3|m4a|aac))/i.exec(withoutSuffix);
   if (aud?.[1]) return { type: 'audio', fileName: aud[1] };
 
   const doc = /(DOC-[^\s]+\.(?:pdf))/i.exec(withoutSuffix);

@@ -262,7 +262,12 @@ export const processChatFile = async (
               attachmentFile.name.toLowerCase().endsWith('.jpg') ||
               attachmentFile.name.toLowerCase().endsWith('.jpeg') ||
               attachmentFile.name.toLowerCase().endsWith('.png');
-            const isAudio = attachmentFile.name.toLowerCase().endsWith('.opus');
+            const isAudio = attachmentFile.name.toLowerCase().endsWith('.opus') ||
+              attachmentFile.name.toLowerCase().endsWith('.mp3') ||
+              attachmentFile.name.toLowerCase().endsWith('.m4a') ||
+              attachmentFile.name.toLowerCase().endsWith('.aac') ||
+              attachmentFile.name.toLowerCase().startsWith('ptt-') ||
+              attachmentFile.name.toLowerCase().startsWith('aud-');
 
             chatData.push({
               id: index,

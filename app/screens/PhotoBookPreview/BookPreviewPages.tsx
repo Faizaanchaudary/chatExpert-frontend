@@ -609,6 +609,7 @@ export const BookPreviewPages: React.FC<BookPreviewPagesProps> = ({
     <View pointerEvents="none" style={{ opacity: 0, position: 'absolute', top: 0, left: 0, width: containerWidth, zIndex: -1 }}>
       {containerWidth > 0 && filteredMessages.map((msg) => {
         const isImage = msg.messageType === 'image';
+        const isVideoOrAudio = msg.messageType === 'video' || msg.messageType === 'audio';
         const rawMedia = (msg as any).url || (msg as any).localPath;
         const hasImageUri = typeof rawMedia === 'string' && rawMedia.length > 0;
         const showText = !isImage || !hasImageUri;
@@ -625,9 +626,12 @@ export const BookPreviewPages: React.FC<BookPreviewPagesProps> = ({
               marginBottom: messageGap,
             }}
           >
-            {!isImage && <Text style={{ fontWeight: '600', fontSize: fontSize - 1, marginBottom: 2 }}>{msg.senderName || ''}</Text>}
-            {showText && <Text style={{ fontSize, lineHeight: fontSize * lineHeight }}>{msg.text || ''}</Text>}
+            {!isImage && !isVideoOrAudio && <Text style={{ fontWeight: '600', fontSize: fontSize - 1, marginBottom: 2 }}>{msg.senderName || ''}</Text>}
+            {showText && !isVideoOrAudio && <Text style={{ fontSize, lineHeight: fontSize * lineHeight }}>{msg.text || ''}</Text>}
             {isImage && hasImageUri && <View style={{ width: 200, height: 200 }} />}
+            {isVideoOrAudio && (msg as any).qrUrl && (
+              <View style={{ width: 120, height: 120 + 16 + 20 + 4 }} />
+            )}
             {showTime && <Text style={{ fontSize: fontSize - 2, marginTop: 4 }}>{msg.sendingTime || ''}</Text>}
           </View>
         );
@@ -782,6 +786,8 @@ export const BookPreviewPages: React.FC<BookPreviewPagesProps> = ({
               : '';
             const text = msg.text || '';
             const isImage = msg.messageType === 'image';
+            const isVideo = msg.messageType === 'video';
+            const isAudio = msg.messageType === 'audio';
             const rawMedia = (msg as any).url || (msg as any).localPath;
             let imageUri: string | undefined;
             if (typeof rawMedia === 'string' && rawMedia.length > 0) {
@@ -877,6 +883,18 @@ export const BookPreviewPages: React.FC<BookPreviewPagesProps> = ({
                       style={[styles.messageImage, imageOnly ? styles.messageImageNoBorder : null]}
                       resizeMode="cover"
                     />
+                  ) : null}
+                  {(isVideo || isAudio) && (msg as any).qrUrl ? (
+                    <View style={styles.qrContainer}>
+                      <Image
+                        source={{ uri: (msg as any).qrUrl }}
+                        style={styles.qrImage}
+                        resizeMode="contain"
+                      />
+                      <Text style={[styles.qrLabel, { fontSize: Math.max(8, fontSize - 2), color: isSender ? colors.senderText || '#000' : colors.receiverText || '#000' }]}>
+                        {isVideo ? 'Scan to watch video' : 'Scan to listen'}
+                      </Text>
+                    </View>
                   ) : null}
                   {timeContent ? (
                     <Text
@@ -978,6 +996,19 @@ const styles = StyleSheet.create({
   messageImageNoBorder: {
     marginTop: 0,
     borderRadius: 18,
+  },
+  qrContainer: {
+    alignItems: 'center',
+    paddingVertical: 8,
+  },
+  qrImage: {
+    width: 120,
+    height: 120,
+  },
+  qrLabel: {
+    marginTop: 4,
+    opacity: 0.8,
+    textAlign: 'center',
   },
   pageNumber: {
     textAlign: 'center',

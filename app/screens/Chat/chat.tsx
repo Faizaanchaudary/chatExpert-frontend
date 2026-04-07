@@ -126,11 +126,23 @@ const Chat: React.FC<ChatProps> = ({ navigation }) => {
   const [contentHeight, setContentHeight] = useState(0);
   const scrollY = useRef(new Animated.Value(0)).current;
 
+  const [trackLayout, setTrackLayout] = useState({ y: 0, height: 0 });
+
+  // Use estimated total height for stable scrollbar (FlashList contentHeight fluctuates due to virtualization)
+  const ESTIMATED_ITEM_SIZE = 60;
+  const estimatedTotalHeight = chatMessages.length * ESTIMATED_ITEM_SIZE;
+  const stableMaxScroll = Math.max(1, estimatedTotalHeight - screenHeight);
+
+  const thumbTravel = Math.max(0, trackLayout.height - 20);
+  const maxScroll = Math.max(1, contentHeight - screenHeight);
+
   const thumbPosition = scrollY.interpolate({
-    inputRange: [0, Math.abs(contentHeight - screenHeight)],
-    outputRange: [0, hp(80)],
+    inputRange: [0, stableMaxScroll],
+    outputRange: [0, thumbTravel],
     extrapolate: 'clamp',
   });
+
+
 
   const [isLoading, setIsLoading] = useState(false);
   const [chatCreationError, setChatCreationError] = useState<string | null>(null);
@@ -666,6 +678,8 @@ const Chat: React.FC<ChatProps> = ({ navigation }) => {
       setIsSubmitting(true);
       let updatedChat: IChat | null = null;
 
+      let qrMap: Record<string, string> = {};
+
       if (whatsappChatData?.mediaFiles?.length) {
         const data = new FormData();
         whatsappChatData.mediaFiles.forEach(file => {
@@ -682,6 +696,7 @@ const Chat: React.FC<ChatProps> = ({ navigation }) => {
 
         const chatResponse = await uploadChatMedia(chatToUse._id, data);
         updatedChat = chatResponse.data.data;
+        qrMap = chatResponse.data.qrMap || {};
 
         if (updatedChat) {
           setChat(updatedChat);
@@ -719,11 +734,18 @@ const Chat: React.FC<ChatProps> = ({ navigation }) => {
             // Verify filename matches (safety check)
             if (uploadedFile && uploadedFile.name === filename) {
               payload.url = uploadedFile.url;
+              // Attach qrUrl for video/audio
+              if ((m.messageType === 'video' || m.messageType === 'audio') && filename && qrMap[filename]) {
+                payload.qrUrl = qrMap[filename];
+              }
             } else {
               // Fallback: search by filename only
               uploadedFile = chatToUse.mediaFiles.find((mf: any) => mf.name === filename);
               if (uploadedFile?.url) {
                 payload.url = uploadedFile.url;
+                if ((m.messageType === 'video' || m.messageType === 'audio') && filename && qrMap[filename]) {
+                  payload.qrUrl = qrMap[filename];
+                }
               }
             }
           }
@@ -735,9 +757,16 @@ const Chat: React.FC<ChatProps> = ({ navigation }) => {
       await bulkMessages(chatToUse._id, messagesPayload);
 
       const finalChat = { ...(updatedChat || chatToUse), bookConfig: bookConfig };
-      // IMPORTANT: keep the deterministic local order as the single source of truth for UI.
-      // Backend response ordering may differ depending on storage/query sorting.
-      const finalMessages = chatMessages;
+      // Merge qrUrl into local messages so Redux has them for preview
+      const finalMessages = chatMessages.map(m => {
+        if ((m.messageType === 'video' || m.messageType === 'audio') && m.localPath) {
+          const filename = m.localPath.split('/').pop();
+          if (filename && qrMap[filename]) {
+            return { ...m, qrUrl: qrMap[filename] };
+          }
+        }
+        return m;
+      });
 
       // Generate a unique ID for this saved chat
       const savedChatId = uuidv4();
@@ -980,16 +1009,22 @@ const Chat: React.FC<ChatProps> = ({ navigation }) => {
             keyExtractor={item => item._id}
             estimatedItemSize={60} // ⚡ important for perf
             onContentSizeChange={(_, h) => setContentHeight(h)}
-            // onScroll={Animated.event(
-            //   [{nativeEvent: {contentOffset: {y: scrollY}}}],
-            //   {useNativeDriver: true},
-            // )}
+            onScroll={Animated.event(
+              [{nativeEvent: {contentOffset: {y: scrollY}}}],
+              { useNativeDriver: false },
+            )}
+            scrollEventThrottle={16}
             showsVerticalScrollIndicator={false}
             contentContainerStyle={styles.contentContainerStyle}
           />
 
           {/* custom scroll thumb */}
           <TouchableOpacity
+            activeOpacity={1}
+            onLayout={(e) => {
+              const { y, height } = e.nativeEvent.layout;
+              setTrackLayout({ y, height });
+            }}
             style={{
               flex: 1,
               position: 'absolute',
@@ -998,6 +1033,12 @@ const Chat: React.FC<ChatProps> = ({ navigation }) => {
               backgroundColor: '#E2E2E2',
               height: screenHeight - hp(17),
               borderRadius: 20,
+            }}
+            onPress={(e) => {
+              const tapY = Math.max(0, Math.min(e.nativeEvent.pageY - trackLayout.y, trackLayout.height));
+              const ratio = tapY / trackLayout.height;
+              const scrollTo = ratio * stableMaxScroll;
+              scrollViewRef.current?.scrollToOffset({ offset: scrollTo, animated: true });
             }}>
             {contentHeight > screenHeight && (
               <Animated.View

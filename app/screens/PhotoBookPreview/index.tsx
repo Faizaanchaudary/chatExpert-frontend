@@ -61,6 +61,10 @@ const PhotoBookPreview: React.FC<PhotoBookPreviewProps> = ({
   const [saveError, setSaveError] = useState<string | null>(null);
   const [previewAreaWidth, setPreviewAreaWidth] = useState<number>(0);
   const [titleEditorVisible, setTitleEditorVisible] = useState(false);
+  
+  // NEW: Multi-book support
+  const [currentBookNumber, setCurrentBookNumber] = useState(1);
+  const [totalBooks, setTotalBooks] = useState(1);
 
   const token = useAppSelector((state: any) => state?.user?.token);
   const user = useAppSelector((state: any) => state?.user?.user);
@@ -82,6 +86,34 @@ const PhotoBookPreview: React.FC<PhotoBookPreviewProps> = ({
   const themeId = themeConfigState?.themeId ?? 'classic';
   const overrides = themeConfigState?.overrides ?? {};
   const resolvedConfig = resolveThemeConfig(themeId, overrides);
+
+  // NEW: Load books metadata from photoBook
+  useEffect(() => {
+    if (photoBook?.books && photoBook.books.length > 0) {
+      setTotalBooks(photoBook.books.length);
+    }
+  }, [photoBook]);
+
+  // NEW: Filter messages for current book
+  const currentBookMessages = React.useMemo(() => {
+    if (!photoBook?.books || photoBook.books.length === 0) {
+      return messages; // Single book - show all messages
+    }
+    
+    // Multi-book: calculate message range for current book
+    const book = photoBook.books.find((b: any) => b.bookNumber === currentBookNumber);
+    if (!book) return messages;
+    
+    // Calculate start/end indices based on book metadata
+    let startIndex = 0;
+    for (let i = 0; i < currentBookNumber - 1; i++) {
+      const prevBook = photoBook.books[i];
+      startIndex += prevBook.messageCount;
+    }
+    const endIndex = startIndex + book.messageCount;
+    
+    return messages.slice(startIndex, endIndex);
+  }, [messages, photoBook, currentBookNumber]);
 
   const loadPhotoBook = useCallback(async () => {
     if (!photoBookId) return;
@@ -304,9 +336,16 @@ const PhotoBookPreview: React.FC<PhotoBookPreviewProps> = ({
       const updated = response.data?.data?.photoBook ?? response.data?.photoBook;
       if (updated) setPhotoBook(updated);
       await loadPhotoBook();
+      
+      // Check if multi-book
+      const totalBooksGenerated = updated?.books?.length || 1;
+      const message = totalBooksGenerated > 1
+        ? `All ${totalBooksGenerated} PDFs generated successfully! You can view them below.`
+        : 'PDF generated successfully! It is saved and you can view it below.';
+      
       Alert.alert(
         'Success',
-        'PDF generated successfully! It is saved and you can view it below.',
+        message,
         [{ text: 'OK' }]
       );
     } catch (error: any) {
@@ -404,6 +443,34 @@ const PhotoBookPreview: React.FC<PhotoBookPreviewProps> = ({
           </View>
 
           <View style={styles.previewSection}>
+            {/* NEW: Book Selector for multi-book */}
+            {totalBooks > 1 && (
+              <View style={styles.bookSelector}>
+                <Text style={styles.bookSelectorTitle}>Select Book:</Text>
+                <View style={styles.bookButtons}>
+                  {Array.from({ length: totalBooks }, (_, i) => i + 1).map(bookNum => (
+                    <TouchableOpacity
+                      key={bookNum}
+                      style={[
+                        styles.bookButton,
+                        currentBookNumber === bookNum && styles.bookButtonActive,
+                      ]}
+                      onPress={() => setCurrentBookNumber(bookNum)}
+                    >
+                      <Text
+                        style={[
+                          styles.bookButtonText,
+                          currentBookNumber === bookNum && styles.bookButtonTextActive,
+                        ]}
+                      >
+                        Book {bookNum}
+                      </Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
+              </View>
+            )}
+            
             <Text style={styles.disclaimer}>
               Preview is approximate. Final PDF may have minor layout differences.
             </Text>
@@ -442,7 +509,7 @@ const PhotoBookPreview: React.FC<PhotoBookPreviewProps> = ({
                 >
                   {messages.length > 0 ? (
                     <BookPreviewPages
-                      messages={messages}
+                      messages={currentBookMessages}
                       pageCount={pageCount || photoBook?.pageCount || 30}
                       resolvedConfig={resolvedConfig}
                       containerWidth={Math.max(containerWidth, 300)}
@@ -500,7 +567,42 @@ const PhotoBookPreview: React.FC<PhotoBookPreviewProps> = ({
             disable={savingTheme === photoBookId || generatingPdf}
           />
         )}
-        {photoBook?.generatedPdfUrl && (
+        {photoBook?.books && photoBook.books.length > 0 ? (
+          // Multi-book: Show button for each book
+          <>
+            <View style={styles.pdfButtonsContainer}>
+              {photoBook.books.map((book: any) => (
+                <TouchableOpacity
+                  key={book.bookNumber}
+                  style={[
+                    styles.viewPdfButton,
+                    !book.generatedPdfUrl && styles.viewPdfButtonDisabled,
+                  ]}
+                  disabled={!book.generatedPdfUrl}
+                  onPress={() => {
+                    if (book.generatedPdfUrl) {
+                      Linking.openURL(book.generatedPdfUrl).catch(() =>
+                        Alert.alert('Error', 'Could not open PDF')
+                      );
+                    }
+                  }}
+                >
+                  <Text style={styles.viewPdfButtonText}>
+                    View Book {book.bookNumber} PDF
+                    {book.status === 'generating' && ' (Generating...)'}
+                    {book.status === 'failed' && ' (Failed)'}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+            <CustomButton
+              text={ordering ? 'Creating Order…' : 'Create Order (All Books)'}
+              onPress={handleCreateOrder}
+              animating={ordering}
+            />
+          </>
+        ) : photoBook?.generatedPdfUrl ? (
+          // Single book: Show single button
           <>
             <TouchableOpacity
               style={styles.viewPdfButton}
@@ -517,7 +619,7 @@ const PhotoBookPreview: React.FC<PhotoBookPreviewProps> = ({
               animating={ordering}
             />
           </>
-        )}
+        ) : null}
       </ScrollView>
 
       <TitleEditorModal
@@ -653,6 +755,51 @@ const styles = StyleSheet.create({
     fontSize: rfs(16),
     fontFamily: fonts.POPPINS.SemiBold,
     color: COLORS.textBlack,
+  },
+  // NEW: Book selector styles
+  bookSelector: {
+    marginBottom: hp(2),
+    padding: wp(3),
+    backgroundColor: COLORS.lightGray,
+    borderRadius: wp(2),
+  },
+  bookSelectorTitle: {
+    fontSize: rfs(14),
+    fontFamily: fonts.POPPINS.SemiBold,
+    color: COLORS.textBlack,
+    marginBottom: hp(1),
+  },
+  bookButtons: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: wp(2),
+  },
+  bookButton: {
+    paddingVertical: hp(1),
+    paddingHorizontal: wp(3),
+    backgroundColor: COLORS.white2,
+    borderRadius: wp(1.5),
+    borderWidth: 1,
+    borderColor: COLORS.lightGray,
+  },
+  bookButtonActive: {
+    backgroundColor: COLORS.lightBlue,
+    borderColor: COLORS.lightBlue,
+  },
+  bookButtonText: {
+    fontSize: rfs(12),
+    fontFamily: fonts.POPPINS.Regular,
+    color: COLORS.textBlack,
+  },
+  bookButtonTextActive: {
+    color: COLORS.white2,
+    fontFamily: fonts.POPPINS.SemiBold,
+  },
+  pdfButtonsContainer: {
+    marginBottom: hp(2),
+  },
+  viewPdfButtonDisabled: {
+    opacity: 0.5,
   },
 });
 

@@ -4,7 +4,13 @@ import moment from 'moment';
 import {styles} from './style';
 import {ChatComponentProps} from '../../interfaces/ChatComponents';
 
-const TextMessage = ({item, stylesConfig}: ChatComponentProps) => {
+interface TextMessageProps extends ChatComponentProps {
+  searchQuery?: string;
+  isCurrentMatch?: boolean;
+  isMatch?: boolean;
+}
+
+const TextMessage = ({item, stylesConfig, searchQuery, isCurrentMatch, isMatch}: TextMessageProps) => {
   const {
     fontFamily,
     fontStyle,
@@ -35,6 +41,56 @@ const TextMessage = ({item, stylesConfig}: ChatComponentProps) => {
 
   const isSender = item.sender === true;
 
+  // Function to highlight search matches in text
+  const renderHighlightedText = (text: string) => {
+    if (!searchQuery || !searchQuery.trim() || !text) {
+      return text;
+    }
+
+    const query = searchQuery.toLowerCase();
+    const lowerText = text.toLowerCase();
+    const parts: React.ReactNode[] = [];
+    let lastIndex = 0;
+    let matchIndex = lowerText.indexOf(query);
+    let key = 0;
+
+    if (matchIndex === -1) {
+      return text;
+    }
+
+    while (matchIndex !== -1) {
+      // Add text before match
+      if (matchIndex > lastIndex) {
+        parts.push(text.substring(lastIndex, matchIndex));
+      }
+
+      // Add highlighted match
+      const highlightColor = isCurrentMatch ? '#FFD700' : '#FFEB3B';
+      
+      parts.push(
+        <Text
+          key={`match-${key++}`}
+          style={{
+            backgroundColor: highlightColor,
+            fontWeight: isCurrentMatch ? 'bold' : 'normal',
+            color: '#000000', // Ensure text is visible
+          }}>
+          {text.substring(matchIndex, matchIndex + query.length)}
+        </Text>
+      );
+
+      lastIndex = matchIndex + query.length;
+      matchIndex = lowerText.indexOf(query, lastIndex);
+    }
+
+    // Add remaining text
+    if (lastIndex < text.length) {
+      parts.push(text.substring(lastIndex));
+    }
+
+    return parts;
+  };
+
   return (
     <View>
       <Text
@@ -49,6 +105,10 @@ const TextMessage = ({item, stylesConfig}: ChatComponentProps) => {
         style={[
           isSender ? styles.senderTextContainer : styles.receiverTextContainer,
           {backgroundColor: isSender ? senderBackground : receiverBackground},
+          isMatch && {
+            borderWidth: 2,
+            borderColor: isCurrentMatch ? '#FFD700' : '#FFEB3B80',
+          }
         ]}>
         <Text
           style={[
@@ -63,7 +123,7 @@ const TextMessage = ({item, stylesConfig}: ChatComponentProps) => {
               fontStyle: fontStyle === 'italic' ? 'italic' : undefined,
             },
           ]}>
-          {item.text}
+          {renderHighlightedText(item.text)}
         </Text>
       </View>
     </View>

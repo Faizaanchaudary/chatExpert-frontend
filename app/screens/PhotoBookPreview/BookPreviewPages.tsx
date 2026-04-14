@@ -630,7 +630,7 @@ export const BookPreviewPages: React.FC<BookPreviewPagesProps> = ({
             {showText && !isVideoOrAudio && <Text style={{ fontSize, lineHeight: fontSize * lineHeight }}>{msg.text || ''}</Text>}
             {isImage && hasImageUri && <View style={{ width: 200, height: 200 }} />}
             {isVideoOrAudio && (msg as any).qrUrl && (
-              <View style={{ width: 120, height: 120 + 16 + 20 + 4 }} />
+              <View style={{ flexDirection: 'row', gap: 12, width: '100%', height: 120 + 16 + 20 + 4 }} />
             )}
             {showTime && <Text style={{ fontSize: fontSize - 2, marginTop: 4 }}>{msg.sendingTime || ''}</Text>}
           </View>
@@ -643,6 +643,8 @@ export const BookPreviewPages: React.FC<BookPreviewPagesProps> = ({
         let lastShownYear: string | null = null;
         let lastShownMonth: string | null = null;
         let globalMessageIndex = 0;
+        let lastSenderName: string | null = null; // Track sender across pages
+        let lastSenderSide: boolean | null = null; // Track sender side (true/false)
 
         return pages.map((pageMessages, pageIndex) => {
           const pageElements: JSX.Element[] = [];
@@ -684,6 +686,9 @@ export const BookPreviewPages: React.FC<BookPreviewPagesProps> = ({
                   </View>
                 );
                 lastShownYear = yearMonth.year;
+                // Reset sender tracking when year changes
+                lastSenderName = null;
+                lastSenderSide = null;
               }
               
               // Month header (if month changed)
@@ -713,6 +718,9 @@ export const BookPreviewPages: React.FC<BookPreviewPagesProps> = ({
                   </View>
                 );
                 lastShownMonth = yearMonth.month;
+                // Reset sender tracking when month changes
+                lastSenderName = null;
+                lastSenderSide = null;
               }
             }
 
@@ -729,6 +737,9 @@ export const BookPreviewPages: React.FC<BookPreviewPagesProps> = ({
                   </View>
                 );
                 lastShownDate = formattedDate;
+                // Reset sender tracking when date changes
+                lastSenderName = null;
+                lastSenderSide = null;
               }
             }
           }
@@ -760,7 +771,19 @@ export const BookPreviewPages: React.FC<BookPreviewPagesProps> = ({
                   </Text>
                 </View>
               );
+              // Reset sender tracking when date changes
+              lastSenderName = null;
+              lastSenderSide = null;
             }
+            
+            // Check if we should show sender name (WhatsApp-style grouping across pages)
+            const currentSenderName = msg.senderName;
+            const currentSenderSide = isMessageFromMe(msg.senderName || '', meName);
+            const showSenderName = lastSenderName !== currentSenderName || lastSenderSide !== currentSenderSide;
+            
+            // Update tracking for next message
+            lastSenderName = currentSenderName;
+            lastSenderSide = currentSenderSide;
             
             globalMessageIndex++;
             
@@ -790,7 +813,11 @@ export const BookPreviewPages: React.FC<BookPreviewPagesProps> = ({
             const isAudio = msg.messageType === 'audio';
             const rawMedia = (msg as any).url || (msg as any).localPath;
             let imageUri: string | undefined;
-            if (typeof rawMedia === 'string' && rawMedia.length > 0) {
+            
+            // For videos, use thumbnailUrl if available, otherwise fall back to video URL
+            if (isVideo && (msg as any).thumbnailUrl) {
+              imageUri = (msg as any).thumbnailUrl;
+            } else if (typeof rawMedia === 'string' && rawMedia.length > 0) {
               if (
                 rawMedia.startsWith('http://') ||
                 rawMedia.startsWith('https://') ||
@@ -805,7 +832,7 @@ export const BookPreviewPages: React.FC<BookPreviewPagesProps> = ({
             const showText = !isImage || !imageUri;
             const imageOnly = isImage && imageUri && !showText;
             const isMedia = msg.messageType === 'image' || msg.messageType === 'video';
-            const hideSenderName = isMedia;
+            const hideSenderName = isMedia || !showSenderName; // Hide if media OR if same sender as previous
 
             elements.push(
               <View
@@ -886,14 +913,28 @@ export const BookPreviewPages: React.FC<BookPreviewPagesProps> = ({
                   ) : null}
                   {(isVideo || isAudio) && (msg as any).qrUrl ? (
                     <View style={styles.qrContainer}>
-                      <Image
-                        source={{ uri: (msg as any).qrUrl }}
-                        style={styles.qrImage}
-                        resizeMode="contain"
-                      />
-                      <Text style={[styles.qrLabel, { fontSize: Math.max(8, fontSize - 2), color: isSender ? colors.senderText || '#000' : colors.receiverText || '#000' }]}>
-                        {isVideo ? 'Scan to watch video' : 'Scan to listen'}
-                      </Text>
+                      {isVideo && imageUri ? (
+                        <View style={styles.videoThumbnailContainer}>
+                          <Image
+                            source={{ uri: imageUri }}
+                            style={styles.videoThumbnail}
+                            resizeMode="cover"
+                          />
+                          <View style={styles.playIconOverlay}>
+                            <Text style={styles.playIcon}>▶</Text>
+                          </View>
+                        </View>
+                      ) : null}
+                      <View style={styles.qrCodeSection}>
+                        <Image
+                          source={{ uri: (msg as any).qrUrl }}
+                          style={styles.qrImage}
+                          resizeMode="contain"
+                        />
+                        <Text style={[styles.qrLabel, { fontSize: Math.max(8, fontSize - 2), color: isSender ? colors.senderText || '#000' : colors.receiverText || '#000' }]}>
+                          {isVideo ? 'Scan to watch video' : 'Scan to listen'}
+                        </Text>
+                      </View>
                     </View>
                   ) : null}
                   {timeContent ? (
@@ -998,8 +1039,41 @@ const styles = StyleSheet.create({
     borderRadius: 18,
   },
   qrContainer: {
+    flexDirection: 'row',
     alignItems: 'center',
     paddingVertical: 8,
+    gap: 12,
+  },
+  videoThumbnailContainer: {
+    position: 'relative',
+    width: 120,
+    height: 120,
+    borderRadius: 8,
+    overflow: 'hidden',
+    backgroundColor: '#e8e8e8',
+  },
+  videoThumbnail: {
+    width: '100%',
+    height: '100%',
+  },
+  playIconOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: 'rgba(0, 0, 0, 0.3)',
+  },
+  playIcon: {
+    fontSize: 32,
+    color: '#fff',
+  },
+  qrCodeSection: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    flex: 1,
   },
   qrImage: {
     width: 120,

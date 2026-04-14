@@ -48,6 +48,9 @@ import {
 import 'react-native-get-random-values';
 import { v4 as uuidv4 } from 'uuid';
 
+// NEW: Import book splitting utilities
+import { estimatePages, splitIntoBooks, formatDateRange, Book } from '../../utils/bookSplitting';
+
 // 🔥 new import
 import { FlashList } from '@shopify/flash-list';
 import { DUMMY_MESSAGES } from '../../utils/seedMessages';
@@ -114,6 +117,12 @@ const Chat: React.FC<ChatProps> = ({ navigation }) => {
   const [showEditModal, setShowEditModal] = useState(false);
   const [sortOrder, setSortOrder] = useState('of');
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(0);
+  const [isProcessing, setIsProcessing] = useState(false); // Backend processing state
+  
+  // Search functionality states
+  const [searchMatches, setSearchMatches] = useState<string[]>([]); // Array of message IDs that match
+  const [currentMatchIndex, setCurrentMatchIndex] = useState(0); // Current highlighted match
 
   // const [hideName, setHideName] = useState(false);
   // const [dateFormat, setDateFormat] = useState('DD/MM/YYYY hh:mm A');
@@ -319,25 +328,46 @@ const Chat: React.FC<ChatProps> = ({ navigation }) => {
       // Remove system / meta messages but preserve user message order.
       const userMessages = filterSystemMessages(parsedAsChatMessages);
       const meName = getMostFrequentSenderName(userMessages);
-      setChatMessages(
-        userMessages.map(m => ({
-          ...m,
-          sender:
-            meName != null &&
-            (m.senderName || '').trim() === meName &&
-            (m.senderName || '').trim().toLowerCase() !== 'system',
-        })),
-      );
+      const finalMessages = userMessages.map(m => ({
+        ...m,
+        sender:
+          meName != null &&
+          (m.senderName || '').trim() === meName &&
+          (m.senderName || '').trim().toLowerCase() !== 'system',
+      }));
+      
+      setChatMessages(finalMessages);
 
       setWhatsappChatData({
         mediaFiles: filesMetaData.mediaFiles,
         chatText: rawChatContent,
       });
 
-      Alert.alert(
-        'Success',
-        `Chat loaded successfully!\nFound ${filesMetaData.mediaFiles.length} media files`,
-      );
+      // NEW: Detect large chats and show warning
+      // Use standard format for estimation (most common)
+      const estimatedPages = estimatePages(finalMessages, 'standard_14_8x21');
+      
+      if (estimatedPages > 200) {
+        const splitBooks = splitIntoBooks(finalMessages, 200);
+        
+        Alert.alert(
+          '📚 Large Chat Detected',
+          `Chat loaded successfully!\nFound ${filesMetaData.mediaFiles.length} media files\n\n` +
+          `Your chat has ${finalMessages.length} messages (~${estimatedPages} pages).\n\n` +
+          `We'll split it into ${splitBooks.length} books for better quality:\n\n` +
+          splitBooks.map(b => 
+            `• Book ${b.bookNumber}: ${formatDateRange(b.dateRange.from)} - ${formatDateRange(b.dateRange.to)} (~${b.estimatedPages} pages)`
+          ).join('\n') +
+          `\n\nYou can preview and order all books together.`,
+          [{ text: 'OK, Continue' }]
+        );
+      } else {
+        // Single book - show success message
+        Alert.alert(
+          'Success',
+          `Chat loaded successfully!\nFound ${filesMetaData.mediaFiles.length} media files`,
+        );
+      }
     } catch (error: any) {
       console.error('Error loading WhatsApp export:', error);
       Alert.alert(
@@ -627,9 +657,7 @@ const Chat: React.FC<ChatProps> = ({ navigation }) => {
 
   const onDeselectAll = () => {
     if (dated) {
-      console.log('Filtered', chatDataFiltered);
       // chatCardRefs.current.forEach((chatCardRef: any) => {
-      //   console.log("chatCardRef", chatCardRef);
       //   if (chatCardRef && chatCardRef.uncheck) {
       //     chatCardRef.uncheck();
       //   }
@@ -679,6 +707,7 @@ const Chat: React.FC<ChatProps> = ({ navigation }) => {
       let updatedChat: IChat | null = null;
 
       let qrMap: Record<string, string> = {};
+      let thumbnailMap: Record<string, string> = {};
 
       if (whatsappChatData?.mediaFiles?.length) {
         const data = new FormData();
@@ -694,17 +723,29 @@ const Chat: React.FC<ChatProps> = ({ navigation }) => {
           });
         });
 
-        const chatResponse = await uploadChatMedia(chatToUse._id, data);
+        const chatResponse = await uploadChatMedia(chatToUse._id, data, (percent) => {
+          setUploadProgress(percent);
+          // When upload reaches 100%, show processing state
+          if (percent === 100) {
+            setIsProcessing(true);
+          }
+        });
         updatedChat = chatResponse.data.data;
         qrMap = chatResponse.data.qrMap || {};
+        thumbnailMap = chatResponse.data.thumbnailMap || {};
 
         if (updatedChat) {
           setChat(updatedChat);
           chatToUse = updatedChat;
+          setUploadProgress(0);
+          setIsProcessing(false);
         }
       }
 
-      const messagesPayload = chatMessages.map((m, messageIndex) => {
+      // Filter only checked messages
+      const checkedMessages = chatMessages.filter(m => m.isCheck === true);
+      
+      const messagesPayload = checkedMessages.map((m, messageIndex) => {
         const payload: any = {
           date: m.date || '',
           messageType: ((m.messageType === 'unknown' ? 'text' : m.messageType) as MessageType),
@@ -719,10 +760,10 @@ const Chat: React.FC<ChatProps> = ({ navigation }) => {
           const filename = m.localPath.split('/').pop();
           
           if (chatToUse.mediaFiles && Array.isArray(chatToUse.mediaFiles)) {
-            // Count how many media messages came before this one
+            // Count how many media messages came before this one IN CHECKED MESSAGES
             let mediaCountBeforeThis = 0;
             for (let i = 0; i < messageIndex; i++) {
-              const prevMsg = chatMessages[i];
+              const prevMsg = checkedMessages[i];
               if ((prevMsg.messageType === 'image' || prevMsg.messageType === 'video' || prevMsg.messageType === 'audio') && prevMsg.localPath) {
                 mediaCountBeforeThis++;
               }
@@ -738,6 +779,10 @@ const Chat: React.FC<ChatProps> = ({ navigation }) => {
               if ((m.messageType === 'video' || m.messageType === 'audio') && filename && qrMap[filename]) {
                 payload.qrUrl = qrMap[filename];
               }
+              // Attach thumbnailUrl for videos only
+              if (m.messageType === 'video' && filename && thumbnailMap[filename]) {
+                payload.thumbnailUrl = thumbnailMap[filename];
+              }
             } else {
               // Fallback: search by filename only
               uploadedFile = chatToUse.mediaFiles.find((mf: any) => mf.name === filename);
@@ -745,6 +790,10 @@ const Chat: React.FC<ChatProps> = ({ navigation }) => {
                 payload.url = uploadedFile.url;
                 if ((m.messageType === 'video' || m.messageType === 'audio') && filename && qrMap[filename]) {
                   payload.qrUrl = qrMap[filename];
+                }
+                // Attach thumbnailUrl for videos only
+                if (m.messageType === 'video' && filename && thumbnailMap[filename]) {
+                  payload.thumbnailUrl = thumbnailMap[filename];
                 }
               }
             }
@@ -757,12 +806,19 @@ const Chat: React.FC<ChatProps> = ({ navigation }) => {
       await bulkMessages(chatToUse._id, messagesPayload);
 
       const finalChat = { ...(updatedChat || chatToUse), bookConfig: bookConfig };
-      // Merge qrUrl into local messages so Redux has them for preview
-      const finalMessages = chatMessages.map(m => {
+      // Merge qrUrl and thumbnailUrl into local messages so Redux has them for preview - ONLY CHECKED MESSAGES
+      const finalMessages = checkedMessages.map(m => {
         if ((m.messageType === 'video' || m.messageType === 'audio') && m.localPath) {
           const filename = m.localPath.split('/').pop();
+          const updates: any = {};
           if (filename && qrMap[filename]) {
-            return { ...m, qrUrl: qrMap[filename] };
+            updates.qrUrl = qrMap[filename];
+          }
+          if (m.messageType === 'video' && filename && thumbnailMap[filename]) {
+            updates.thumbnailUrl = thumbnailMap[filename];
+          }
+          if (Object.keys(updates).length > 0) {
+            return { ...m, ...updates };
           }
         }
         return m;
@@ -793,11 +849,28 @@ const Chat: React.FC<ChatProps> = ({ navigation }) => {
       const bookspecs = route?.params?.bookspecs;
 
       if (photoBookFlow && finalChat?._id) {
+        // NEW: Calculate books metadata for multi-book support
+        const estimatedPages = estimatePages(finalMessages, format || 'standard_14_8x21');
+        let booksMetadata = undefined;
+        
+        if (estimatedPages > 200) {
+          const splitBooks = splitIntoBooks(finalMessages, 200);
+          booksMetadata = splitBooks.map(b => ({
+            bookNumber: b.bookNumber,
+            messageCount: b.messages.length,
+            estimatedPages: b.estimatedPages,
+            dateRange: b.dateRange,
+          }));
+          
+          console.log(`📚 Chat will be split into ${booksMetadata.length} books`);
+        }
+        
         // Navigate to PageSelection instead of going back
         navigation.navigate('PageSelection', {
           chatId: finalChat._id,
           format: format,
           bookspecs: bookspecs,
+          books: booksMetadata, // NEW: Pass books metadata
         });
       } else {
         navigation.goBack();
@@ -809,6 +882,8 @@ const Chat: React.FC<ChatProps> = ({ navigation }) => {
       Alert.alert('Error', 'Chat not saved correctly. Please try again.');
     } finally {
       setIsSubmitting(false);
+      setUploadProgress(0);
+      setIsProcessing(false);
     }
 
     // const jsonManipulator = chatData?.map(item => {
@@ -895,19 +970,82 @@ const Chat: React.FC<ChatProps> = ({ navigation }) => {
     );
   }, []);
 
+  // Scroll to a specific message by ID
+  const scrollToMessage = useCallback((messageId: string) => {
+    const index = chatMessages.findIndex(msg => msg._id === messageId);
+    if (index !== -1 && scrollViewRef.current) {
+      scrollViewRef.current.scrollToIndex({
+        index,
+        animated: true,
+        viewPosition: 0.5, // Center the message on screen
+      });
+    }
+  }, [chatMessages]);
+
+  // Search functionality: Find all matching messages
+  useEffect(() => {
+    if (search.trim()) {
+      const matches = chatMessages
+        .filter(msg => 
+          msg.text?.toLowerCase().includes(search.toLowerCase())
+        )
+        .map(msg => msg._id);
+      
+      setSearchMatches(matches);
+      setCurrentMatchIndex(matches.length > 0 ? 0 : -1);
+      
+      // Auto-scroll to first match
+      if (matches.length > 0) {
+        scrollToMessage(matches[0]);
+      }
+    } else {
+      setSearchMatches([]);
+      setCurrentMatchIndex(-1);
+    }
+  }, [search, chatMessages, scrollToMessage]);
+
+  // Navigate to next search match
+  const handleNextMatch = useCallback(() => {
+    if (searchMatches.length === 0) return;
+    
+    const nextIndex = (currentMatchIndex + 1) % searchMatches.length;
+    setCurrentMatchIndex(nextIndex);
+    scrollToMessage(searchMatches[nextIndex]);
+  }, [searchMatches, currentMatchIndex, scrollToMessage]);
+
+  // Navigate to previous search match
+  const handlePrevMatch = useCallback(() => {
+    if (searchMatches.length === 0) return;
+    
+    const prevIndex = currentMatchIndex === 0 
+      ? searchMatches.length - 1 
+      : currentMatchIndex - 1;
+    setCurrentMatchIndex(prevIndex);
+    scrollToMessage(searchMatches[prevIndex]);
+  }, [searchMatches, currentMatchIndex, scrollToMessage]);
+
   // 📌 FlashList render – full-width row so ChatCard alignSelf (left/right) works
   const renderChats = useCallback(
-    ({ item, index }: { item: IMessage; index: number }) => (
-      <View style={styles.messageRow}>
-        <ChatCard
-          item={item}
-          index={index}
-          stylesConfig={bookConfig}
-          checkPress={() => handleToggleCheck(item._id)}
-        />
-      </View>
-    ),
-    [bookConfig, handleToggleCheck],
+    ({ item, index }: { item: IMessage; index: number }) => {
+      const isCurrentMatch = searchMatches.length > 0 && 
+        item._id === searchMatches[currentMatchIndex];
+      const isMatch = searchMatches.includes(item._id);
+      
+      return (
+        <View style={styles.messageRow}>
+          <ChatCard
+            item={item}
+            index={index}
+            stylesConfig={bookConfig}
+            checkPress={() => handleToggleCheck(item._id)}
+            searchQuery={search}
+            isCurrentMatch={isCurrentMatch}
+            isMatch={isMatch}
+          />
+        </View>
+      );
+    },
+    [bookConfig, handleToggleCheck, search, searchMatches, currentMatchIndex],
   );
 
   return (
@@ -917,6 +1055,10 @@ const Chat: React.FC<ChatProps> = ({ navigation }) => {
           setSearchBarState={setSearchBarState}
           value={search}
           onChangeText={(txt: any) => setSearch(txt)}
+          onPressNext={handleNextMatch}
+          onPressPrev={handlePrevMatch}
+          matchCount={searchMatches.length}
+          currentMatch={searchMatches.length > 0 ? currentMatchIndex + 1 : 0}
         />
       ) : (
         <CustomHeader
@@ -1002,6 +1144,7 @@ const Chat: React.FC<ChatProps> = ({ navigation }) => {
             ref={scrollViewRef}
             data={chatMessages}
             renderItem={renderChats}
+            extraData={{search, searchMatches, currentMatchIndex}} // Force re-render on search changes
             getItemType={item => {
               if (item.messageType) return item.messageType;
               return 'text';
@@ -1087,7 +1230,7 @@ const Chat: React.FC<ChatProps> = ({ navigation }) => {
           </TouchableOpacity> */}
         </>
       )}
-      {search == '' && (
+      {!searchBarState && (
         <>
           {chatMessages?.length > 0 ? (
             <TouchableOpacity
@@ -1098,7 +1241,7 @@ const Chat: React.FC<ChatProps> = ({ navigation }) => {
           ) : null}
         </>
       )}
-      {search == '' && (
+      {!searchBarState && (
         <View style={styles.bottomButtonContainer}>
           {chatMessages?.length > 0 ? (
             <CustomButton
@@ -1131,7 +1274,13 @@ const Chat: React.FC<ChatProps> = ({ navigation }) => {
               <CustomButton
                 animating={isSubmitting}
                 disable={isSubmitting}
-                text="Done"
+                text={
+                  isProcessing 
+                    ? 'Processing media...' 
+                    : uploadProgress > 0 && uploadProgress < 100 
+                      ? `Uploading ${uploadProgress}%` 
+                      : 'Done'
+                }
                 oddContainerStyle={[styles.customButtonOddContainer, styles.doneButton]}
                 oddTextStyle={styles.oddTextStyle}
                 onPress={onPressDone}
@@ -1140,26 +1289,16 @@ const Chat: React.FC<ChatProps> = ({ navigation }) => {
           ) : null}
         </View>
       )}
-      {search && (
+      {searchBarState && (
         <CustomButton
           text="Done"
           oddContainerStyle={styles.customButtonOddContainerForSearch}
           oddTextStyle={styles.oddTextStyle}
           onPress={() => {
-            // When closing search, ensure the main chatMessages reflects the current selection state
-            const updatedChatData = chatMessages.map((item: any) => {
-              const filteredItem = chatDataFiltered.find(
-                filtered => filtered._id === item.id,
-              );
-              if (filteredItem) {
-                return { ...item, isCheck: filteredItem.isCheck };
-              }
-              return item;
-            });
-
-            setChatMessages(updatedChatData);
             setSearchBarState(false);
             setSearch('');
+            setSearchMatches([]);
+            setCurrentMatchIndex(-1);
           }}
         />
       )}

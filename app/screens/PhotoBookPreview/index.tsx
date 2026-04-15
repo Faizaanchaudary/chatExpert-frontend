@@ -112,6 +112,16 @@ const PhotoBookPreview: React.FC<PhotoBookPreviewProps> = ({
     });
   }, [photoBook, bookUploadStatus]);
 
+  // Check if PDF is generated (single or multi-book)
+  // Also true while generatingPdf so UI switches immediately on click
+  const pdfGenerated = React.useMemo(() => {
+    if (generatingPdf) return true; // Switch UI immediately when generation starts
+    if (photoBook?.books && photoBook.books.length > 0) {
+      return photoBook.books.some((b: any) => b.generatedPdfUrl);
+    }
+    return !!photoBook?.generatedPdfUrl;
+  }, [photoBook, generatingPdf]);
+
   // NEW: Filter messages for current book
   const currentBookMessages = React.useMemo(() => {
     console.log(`🔍 Book ${currentBookNumber}: photoBook.books length:`, photoBook?.books?.length || 0);
@@ -413,6 +423,9 @@ const PhotoBookPreview: React.FC<PhotoBookPreviewProps> = ({
     console.log('✅ Dispatched to Redux with overrides:', { ...overrides, customTitles });
   };
 
+  // Per-book PDF generation status (for UI tracking during generation)
+  const [bookPdfStatus, setBookPdfStatus] = useState<Record<number, 'pending' | 'generating' | 'completed' | 'failed'>>({});
+
   const handleGeneratePdf = async () => {
     if (!token) {
       Alert.alert('Error', 'Please log in to continue');
@@ -421,6 +434,14 @@ const PhotoBookPreview: React.FC<PhotoBookPreviewProps> = ({
     }
     setSaveError(null);
     setGeneratingPdf(true);
+
+    // Init per-book status
+    if (photoBook?.books && photoBook.books.length > 0) {
+      const initial: Record<number, 'pending' | 'generating' | 'completed' | 'failed'> = {};
+      photoBook.books.forEach((b: any) => { initial[b.bookNumber] = 'pending'; });
+      setBookPdfStatus(initial);
+    }
+
     const theme_config: ThemeConfigStored = {
       themeId,
       schemaVersion: 1,
@@ -430,31 +451,53 @@ const PhotoBookPreview: React.FC<PhotoBookPreviewProps> = ({
       dispatch(setSavingTheme(photoBookId));
       await updatePhotoBookThemeConfig(photoBookId, theme_config);
       dispatch(setSavingTheme(null));
+
+      // Start polling while PDF generates
+      let pollInterval: any = null;
+      if (photoBook?.books && photoBook.books.length > 0) {
+        // Mark book 1 as generating immediately
+        setBookPdfStatus(prev => ({ ...prev, 1: 'generating' }));
+
+        pollInterval = setInterval(async () => {
+          try {
+            const res = await getPhotoBookById(photoBookId);
+            const latest = res.data?.data ?? res.data;
+            if (latest?.books) {
+              const newStatus: Record<number, any> = {};
+              latest.books.forEach((b: any) => { newStatus[b.bookNumber] = b.status; });
+              setBookPdfStatus(newStatus);
+              setPhotoBook(latest);
+            }
+          } catch {}
+        }, 3000); // Poll every 3 seconds
+      }
+
       const response = await generatePhotoBookPdf(photoBookId);
-      const updated = response.data?.data?.photoBook ?? response.data?.photoBook;
-      if (updated) setPhotoBook(updated);
-      await loadPhotoBook();
       
-      // Check if multi-book
+      if (pollInterval) clearInterval(pollInterval);
+
+      const updated = response.data?.data?.photoBook ?? response.data?.photoBook;
+      if (updated) {
+        setPhotoBook(updated);
+        // Set final statuses
+        if (updated.books) {
+          const finalStatus: Record<number, any> = {};
+          updated.books.forEach((b: any) => { finalStatus[b.bookNumber] = b.status; });
+          setBookPdfStatus(finalStatus);
+        }
+      }
+      await loadPhotoBook();
+
       const totalBooksGenerated = updated?.books?.length || 1;
       const message = totalBooksGenerated > 1
-        ? `All ${totalBooksGenerated} PDFs generated successfully! You can view them below.`
+        ? `All ${totalBooksGenerated} PDFs generated successfully!`
         : 'PDF generated successfully! It is saved and you can view it below.';
-      
-      Alert.alert(
-        'Success',
-        message,
-        [{ text: 'OK' }]
-      );
+
+      Alert.alert('Success', message, [{ text: 'OK' }]);
     } catch (error: any) {
       dispatch(setSavingTheme(null));
-      setSaveError(
-        error.response?.data?.message || error.message || 'Failed to generate PDF'
-      );
-      Alert.alert(
-        'Error',
-        error.response?.data?.message || 'Failed to generate PDF'
-      );
+      setSaveError(error.response?.data?.message || error.message || 'Failed to generate PDF');
+      Alert.alert('Error', error.response?.data?.message || 'Failed to generate PDF');
     } finally {
       setGeneratingPdf(false);
     }
@@ -466,7 +509,10 @@ const PhotoBookPreview: React.FC<PhotoBookPreviewProps> = ({
       navigation.navigate('Addresses');
       return;
     }
-    if (!photoBook?.generatedPdfUrl) {
+    // Check for PDF - works for both single and multi-book
+    const hasPdf = photoBook?.generatedPdfUrl || 
+      (photoBook?.books && photoBook.books.some((b: any) => b.generatedPdfUrl));
+    if (!hasPdf) {
       Alert.alert('Error', 'Please generate PDF first');
       return;
     }
@@ -519,6 +565,7 @@ const PhotoBookPreview: React.FC<PhotoBookPreviewProps> = ({
         <Text style={styles.title}>Book Preview</Text>
 
         <View style={styles.twoColumn}>
+          {!pdfGenerated && (
           <View style={styles.leftColumn}>
             <ThemeSelector
               selectedThemeId={themeId}
@@ -539,8 +586,9 @@ const PhotoBookPreview: React.FC<PhotoBookPreviewProps> = ({
               onEditTitles={handleEditTitles}
             />
           </View>
+          )}
 
-          <View style={styles.previewSection}>
+          <View style={pdfGenerated ? styles.fullWidth : styles.previewSection}>
             {/* NEW: Book Selector for multi-book with upload status */}
             {totalBooks > 1 && (
               <View style={styles.bookSelector}>
@@ -629,12 +677,18 @@ const PhotoBookPreview: React.FC<PhotoBookPreviewProps> = ({
             >
             {previewUrl ? (
               <Image source={{ uri: previewUrl }} style={styles.previewImage} />
-            ) : photoBook?.generatedPdfUrl ? (
+            ) : pdfGenerated ? (
               <View style={styles.a5Wrapper}>
                 <View style={[styles.pdfPlaceholder, { height: previewHeight }]}>
                   <Text style={styles.pdfIcon}>📄</Text>
-                  <Text style={styles.pdfText}>PDF ready (saved)</Text>
-                  <Text style={styles.pdfSubtext}>Tap "View PDF" below to open and check how it looks.</Text>
+                  <Text style={styles.pdfText}>
+                    {generatingPdf ? 'Generating PDFs...' : 'PDFs ready!'}
+                  </Text>
+                  <Text style={styles.pdfSubtext}>
+                    {generatingPdf
+                      ? 'Please wait, generating remaining books...'
+                      : 'View and download each book\'s PDF below.'}
+                  </Text>
                 </View>
               </View>
             ) : (
@@ -724,7 +778,7 @@ const PhotoBookPreview: React.FC<PhotoBookPreviewProps> = ({
           </View>
         </View>
 
-        {!photoBook?.generatedPdfUrl && (
+        {!pdfGenerated && (
           <CustomButton
             text={
               savingTheme
@@ -740,39 +794,55 @@ const PhotoBookPreview: React.FC<PhotoBookPreviewProps> = ({
             disable={savingTheme === photoBookId || generatingPdf || !allBooksUploaded}
           />
         )}
-        {photoBook?.books && photoBook.books.length > 0 ? (
-          // Multi-book: Show button for each book
+        {photoBook?.books && photoBook.books.length > 0 && pdfGenerated ? (
+          // Multi-book: Show per-book status
           <>
             <View style={styles.pdfButtonsContainer}>
-              {photoBook.books.map((book: any) => (
-                <TouchableOpacity
-                  key={book.bookNumber}
-                  style={[
-                    styles.viewPdfButton,
-                    !book.generatedPdfUrl && styles.viewPdfButtonDisabled,
-                  ]}
-                  disabled={!book.generatedPdfUrl}
-                  onPress={() => {
-                    if (book.generatedPdfUrl) {
-                      Linking.openURL(book.generatedPdfUrl).catch(() =>
-                        Alert.alert('Error', 'Could not open PDF')
-                      );
-                    }
-                  }}
-                >
-                  <Text style={styles.viewPdfButtonText}>
-                    View Book {book.bookNumber} PDF
-                    {book.status === 'generating' && ' (Generating...)'}
-                    {book.status === 'failed' && ' (Failed)'}
-                  </Text>
-                </TouchableOpacity>
-              ))}
+              {photoBook.books.map((book: any) => {
+                const status = bookPdfStatus[book.bookNumber] || book.status || 'pending';
+                const isGenerating = status === 'generating';
+                const isCompleted = status === 'completed' && book.generatedPdfUrl;
+                const isFailed = status === 'failed';
+                const isPending = status === 'pending';
+
+                return (
+                  <View key={book.bookNumber} style={styles.bookPdfRow}>
+                    {isCompleted ? (
+                      <TouchableOpacity
+                        style={styles.viewPdfButton}
+                        onPress={() => Linking.openURL(book.generatedPdfUrl).catch(() => Alert.alert('Error', 'Could not open PDF'))}
+                      >
+                        <Text style={styles.viewPdfButtonText}>📄 View Book {book.bookNumber} PDF</Text>
+                      </TouchableOpacity>
+                    ) : isGenerating ? (
+                      <View style={styles.bookPdfStatusRow}>
+                        <ActivityIndicator size="small" color={COLORS.lightBlue} />
+                        <Text style={styles.bookPdfStatusText}>Book {book.bookNumber} — Generating PDF...</Text>
+                      </View>
+                    ) : isFailed ? (
+                      <View style={styles.bookPdfStatusRow}>
+                        <Text style={styles.bookPdfFailedText}>❌ Book {book.bookNumber} — Failed</Text>
+                        <TouchableOpacity style={styles.retryPdfButton} onPress={handleGeneratePdf}>
+                          <Text style={styles.retryPdfButtonText}>Retry</Text>
+                        </TouchableOpacity>
+                      </View>
+                    ) : (
+                      <View style={styles.bookPdfStatusRow}>
+                        <ActivityIndicator size="small" color={COLORS.lightBlue} />
+                        <Text style={styles.bookPdfStatusText}>Book {book.bookNumber} — Waiting...</Text>
+                      </View>
+                    )}
+                  </View>
+                );
+              })}
             </View>
-            <CustomButton
-              text={ordering ? 'Creating Order…' : 'Create Order (All Books)'}
-              onPress={handleCreateOrder}
-              animating={ordering}
-            />
+            {photoBook.books.every((b: any) => b.generatedPdfUrl) && (
+              <CustomButton
+                text={ordering ? 'Creating Order…' : 'Create Order (All Books)'}
+                onPress={handleCreateOrder}
+                animating={ordering}
+              />
+            )}
           </>
         ) : photoBook?.generatedPdfUrl ? (
           // Single book: Show single button
@@ -834,6 +904,43 @@ const styles = StyleSheet.create({
     flex: 1,
     minWidth: 200,
     width: '100%',
+  },
+  fullWidth: {
+    flex: 1,
+    width: '100%',
+  },
+  bookPdfRow: {
+    marginBottom: hp(1),
+  },
+  bookPdfStatusRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: wp(2),
+    paddingVertical: hp(1),
+    paddingHorizontal: wp(3),
+    backgroundColor: COLORS.white2,
+    borderRadius: 8,
+  },
+  bookPdfStatusText: {
+    fontSize: rfs(13),
+    color: COLORS.lightBlue,
+    flex: 1,
+  },
+  bookPdfFailedText: {
+    fontSize: rfs(13),
+    color: 'red',
+    flex: 1,
+  },
+  retryPdfButton: {
+    backgroundColor: COLORS.lightBlue,
+    paddingHorizontal: wp(3),
+    paddingVertical: hp(0.5),
+    borderRadius: 6,
+  },
+  retryPdfButtonText: {
+    color: COLORS.white,
+    fontSize: rfs(12),
+    fontWeight: '600',
   },
   previewBoxWrapper: {
     width: '100%',

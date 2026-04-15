@@ -59,7 +59,7 @@ export const parseChat = (content: string) => {
         if (currentMessage) {
           messages.push(currentMessage);
         }
-        console.log('current', currentMessage);
+
         const [_, date, sender, message] = match;
         currentMessage = {
           date: date || 'Unknown',
@@ -151,7 +151,6 @@ export const processChatFile = async (
         fullMessage === '<Médias omis>' ||
         fullMessage === '<Media omitted>'
       ) {
-        console.log('Contains omitted media');
         continue;
       }
 
@@ -159,11 +158,9 @@ export const processChatFile = async (
         item?.message == '<Médias omis>' ||
         item?.message == '<Media omitted>'
       ) {
-        console.log('Contains ommitment');
         return;
       }
       if (fullMessage === 'Messages and calls are end-to-end encrypted') {
-        console.log('Contains omitted media');
         continue;
       }
       if (fullMessage?.toUpperCase().includes('is a contact'.toUpperCase())) {

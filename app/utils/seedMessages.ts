@@ -34,7 +34,7 @@ function generateId(): string {
   return `msg_${Date.now()}_${counter++}_${Math.floor(Math.random() * 10000)}`;
 }
 
-export const DUMMY_MESSAGES: IMessage[] = Array.from({length: 500}, () => {
+export const DUMMY_MESSAGES: IMessage[] = Array.from({length: 4000}, () => {
   const text = randomTexts[Math.floor(Math.random() * randomTexts.length)];
   const date = getRandomDate();
   const time = getRandomTime();

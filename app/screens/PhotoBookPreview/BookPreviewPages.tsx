@@ -603,6 +603,25 @@ export const BookPreviewPages: React.FC<BookPreviewPagesProps> = ({
   }, [paginationReady, msgHeights, filteredMessages, availableHeight, dateFormat, dateStyle, dateLanguage, imageLayout, containerWidth]);
   const totalPreviewPages = pages.length;
 
+  // Console log for page calculation comparison
+  React.useEffect(() => {
+    if (paginationReady && pages.length > 0) {
+      console.log(`📄 BookPreviewPages CALCULATED: ${pages.length} pages from ${filteredMessages.length} messages`);
+      console.log(`📄 Available height per page: ${availableHeight.toFixed(0)}px`);
+      console.log(`📄 Page dimensions: ${dimensions.width}x${dimensions.height}, scale: ${scale.toFixed(2)}`);
+      
+      // NEW: Calculate how many messages fit in 200 pages
+      if (pages.length > 200) {
+        let messagesIn200Pages = 0;
+        for (let i = 0; i < Math.min(200, pages.length); i++) {
+          messagesIn200Pages += pages[i].length;
+        }
+        console.log(`📊 SPLIT ANALYSIS: ${messagesIn200Pages} messages fit in first 200 pages (out of ${filteredMessages.length} total)`);
+        console.log(`📊 Ratio: ${(messagesIn200Pages / filteredMessages.length * 100).toFixed(1)}% of messages in first 200 pages`);
+      }
+    }
+  }, [pages.length, filteredMessages.length, paginationReady, availableHeight, dimensions, scale]);
+
   return (
     <>
     {/* Hidden measurement pass — renders all messages off-screen to capture heights */}

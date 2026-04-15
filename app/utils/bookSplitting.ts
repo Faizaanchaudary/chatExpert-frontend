@@ -4,6 +4,7 @@
  */
 
 import { IMessage } from '../interfaces/IMessage';
+import { calculateTotalPages, splitIntoBooksByPages } from './paginationUtils';
 
 export interface Book {
   bookNumber: number;
@@ -15,100 +16,62 @@ export interface Book {
   };
 }
 
+// NEW: Book chunk with media files for upload
+export interface BookChunk {
+  bookNumber: number;
+  messages: IMessage[];
+  mediaFiles: any[]; // ReadDirItem[] from react-native-fs
+  estimatedPages: number;
+  dateRange: {
+    from: string;
+    to: string;
+  };
+  uploadStatus: 'pending' | 'uploading' | 'completed' | 'failed';
+  uploadProgress: number; // 0-100
+}
+
 /**
  * Estimate total pages from messages
- * Uses same logic as BookPreviewPages component
+ * NOW USES SHARED PAGINATION LOGIC
  */
 export function estimatePages(messages: IMessage[], format: string): number {
-  const dimensions = format === 'square_14x14' 
-    ? { width: 595, height: 595 }
-    : { width: 560, height: 820 };
-  
-  const PAGE_OVERHEAD = 56; // padding + page number
-  const availableHeight = dimensions.height - PAGE_OVERHEAD;
-  
-  let totalHeight = 0;
-  
-  messages.forEach(msg => {
-    if (msg.messageType === 'image') {
-      // Image: 200px image + 13px time + 10px gap
-      totalHeight += 223;
-    } else if (msg.messageType === 'video' || msg.messageType === 'audio') {
-      // Video/Audio: QR code + thumbnail ~170px
-      totalHeight += 170;
-    } else {
-      // Text message: estimate based on text length
-      const text = msg.text || '';
-      const avgCharsPerLine = 40;
-      const lines = Math.max(1, Math.ceil(text.length / avgCharsPerLine));
-      // senderName + text lines + time + padding + gap
-      totalHeight += (11 + 2) + (lines * 11 * 1.5) + (9 + 4) + 20 + 10;
-    }
-  });
-  
-  return Math.ceil(totalHeight / availableHeight);
+  return calculateTotalPages(messages, format as any);
 }
 
 /**
  * Split messages into books with max pages per book
- * Returns array of books with metadata
+ * 
+ * IMPORTANT: Uses empirical data from real preview rendering
+ * Real data shows ~800 messages = 200 pages for typical WhatsApp chats
+ * This accounts for date headers, text wrapping, and actual rendering
  */
 export function splitIntoBooks(
   messages: IMessage[], 
   maxPagesPerBook: number = 200
 ): Book[] {
   const books: Book[] = [];
-  let currentBook: IMessage[] = [];
-  let currentPages = 0;
+  
+  // Empirical ratio: ~800 messages = 200 pages (from real preview data)
+  // This accounts for date headers (68+48+44px), text wrapping, etc.
+  const MESSAGES_PER_200_PAGES = 800;
+  const messagesPerBook = Math.floor((MESSAGES_PER_200_PAGES * maxPagesPerBook) / 200);
+  
   let bookNumber = 1;
   
-  for (const msg of messages) {
-    // Rough page estimate per message
-    let msgPages = 0;
-    if (msg.messageType === 'image') {
-      msgPages = 0.4; // ~2.5 images per page
-    } else if (msg.messageType === 'video' || msg.messageType === 'audio') {
-      msgPages = 0.3; // ~3 videos per page
-    } else {
-      // Text: estimate based on length
-      const textLength = (msg.text || '').length;
-      msgPages = Math.max(0.1, textLength / 500); // ~500 chars per page
-    }
+  for (let i = 0; i < messages.length; i += messagesPerBook) {
+    const bookMessages = messages.slice(i, i + messagesPerBook);
     
-    // Check if adding this message would exceed max pages
-    if (currentPages + msgPages > maxPagesPerBook && currentBook.length > 0) {
-      // Save current book
-      books.push({
-        bookNumber,
-        messages: currentBook,
-        estimatedPages: Math.ceil(currentPages),
-        dateRange: {
-          from: currentBook[0].date || currentBook[0].sendingTime || '',
-          to: currentBook[currentBook.length - 1].date || currentBook[currentBook.length - 1].sendingTime || '',
-        },
-      });
-      
-      // Start new book
-      bookNumber++;
-      currentBook = [msg];
-      currentPages = msgPages;
-    } else {
-      currentBook.push(msg);
-      currentPages += msgPages;
-    }
-  }
-  
-  // Add last book
-  if (currentBook.length > 0) {
     books.push({
       bookNumber,
-      messages: currentBook,
-      estimatedPages: Math.ceil(currentPages),
+      messages: bookMessages,
+      estimatedPages: maxPagesPerBook,
       dateRange: {
-        from: currentBook[0].date || currentBook[0].sendingTime || '',
-        to: currentBook[currentBook.length - 1].date || currentBook[currentBook.length - 1].sendingTime || '',
+        from: bookMessages[0].date || bookMessages[0].sendingTime || '',
+        to: bookMessages[bookMessages.length - 1].date || bookMessages[bookMessages.length - 1].sendingTime || '',
       },
     });
+    
+    bookNumber++;
   }
   
   return books;
@@ -132,4 +95,49 @@ export function formatDateRange(dateStr: string): string {
   }
   
   return dateStr;
+}
+
+
+/**
+ * Split messages AND media files into books (by pages)
+ * Returns array of book chunks with messages + media
+ */
+export function splitIntoBooksWithMedia(
+  messages: IMessage[],
+  mediaFiles: any[], // ReadDirItem[]
+  maxPagesPerBook: number = 200,
+  format: string = 'standard_14_8x21'
+): BookChunk[] {
+  // First split messages into books by PAGES
+  const messageBooks = splitIntoBooks(messages, maxPagesPerBook);
+  
+  // Then assign media files to each book based on message references
+  const bookChunks: BookChunk[] = [];
+  
+  for (const book of messageBooks) {
+    const bookMediaFiles: any[] = [];
+    
+    // For each message in this book, find its media file
+    for (const msg of book.messages) {
+      if ((msg.messageType === 'image' || msg.messageType === 'video' || msg.messageType === 'audio') && msg.localPath) {
+        const filename = msg.localPath.split('/').pop();
+        const mediaFile = mediaFiles.find((f: any) => f.name === filename);
+        if (mediaFile && !bookMediaFiles.find((f: any) => f.name === filename)) {
+          bookMediaFiles.push(mediaFile);
+        }
+      }
+    }
+    
+    bookChunks.push({
+      bookNumber: book.bookNumber,
+      messages: book.messages,
+      mediaFiles: bookMediaFiles,
+      estimatedPages: book.estimatedPages,
+      dateRange: book.dateRange,
+      uploadStatus: 'pending',
+      uploadProgress: 0,
+    });
+  }
+  
+  return bookChunks;
 }

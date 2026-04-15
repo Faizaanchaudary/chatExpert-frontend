@@ -49,7 +49,7 @@ import 'react-native-get-random-values';
 import { v4 as uuidv4 } from 'uuid';
 
 // NEW: Import book splitting utilities
-import { estimatePages, splitIntoBooks, formatDateRange, Book } from '../../utils/bookSplitting';
+import { estimatePages, splitIntoBooks, splitIntoBooksWithMedia, formatDateRange, Book, BookChunk } from '../../utils/bookSplitting';
 
 // 🔥 new import
 import { FlashList } from '@shopify/flash-list';
@@ -67,7 +67,7 @@ import {
 import { useAppDispatch, useAppSelector } from '../../store/Store';
 import { getMimeType } from '../../utils/mediaUtils';
 import { IChat } from '../../interfaces/IChat';
-import { saveCurrentChat, saveCurrentChatMessages } from '../../store/Slice/chatSlice';
+import { saveCurrentChat, saveCurrentChatMessages, updateBookUploadStatus, appendBookMessages, clearBookData } from '../../store/Slice/chatSlice';
 import { saveChat } from '../../store/Slice/userSlice';
 import { IBookConfig } from '../../interfaces/IBookConfig';
 import { filterSystemMessages, getMostFrequentSenderName } from '../../utils/systemMessageFilter';
@@ -139,17 +139,9 @@ const Chat: React.FC<ChatProps> = ({ navigation }) => {
 
   // Use estimated total height for stable scrollbar (FlashList contentHeight fluctuates due to virtualization)
   const ESTIMATED_ITEM_SIZE = 60;
-  const estimatedTotalHeight = chatMessages.length * ESTIMATED_ITEM_SIZE;
-  const stableMaxScroll = Math.max(1, estimatedTotalHeight - screenHeight);
 
   const thumbTravel = Math.max(0, trackLayout.height - 20);
   const maxScroll = Math.max(1, contentHeight - screenHeight);
-
-  const thumbPosition = scrollY.interpolate({
-    inputRange: [0, stableMaxScroll],
-    outputRange: [0, thumbTravel],
-    extrapolate: 'clamp',
-  });
 
 
 
@@ -174,13 +166,12 @@ const Chat: React.FC<ChatProps> = ({ navigation }) => {
       .catch(err => {
         const msg = err?.response?.data?.message || err?.message || 'Could not create chat';
         setChatCreationError(msg);
-        console.log('Error in chat creation:', msg);
+        console.error('Error in chat creation:', msg);
       });
   }, [user?._id, bookConfig]);
 
   useEffect(() => {
     if (user?._id) {
-      console.log('Creating chat for user:', user._id);
       createChatOnce();
     }
   }, [user?._id, createChatOnce]);
@@ -194,7 +185,6 @@ const Chat: React.FC<ChatProps> = ({ navigation }) => {
 
   useEffect(() => {
     if (!user) {
-      console.log('⚠️ User not logged in, skipping IntentReceived listener setup');
       return;
     }
     const eventEmitter = new NativeEventEmitter();
@@ -203,10 +193,8 @@ const Chat: React.FC<ChatProps> = ({ navigation }) => {
       if (uri) {
         // Process regardless of focus state, but show warning
         if (isFocused) {
-          console.log('✅ Screen is focused, processing URI...');
           loadViaRoute(uri);
         } else {
-          console.warn('⚠️ Screen not focused, but will process anyway');
           // Process anyway - focus check might be stale
           loadViaRoute(uri);
         }
@@ -216,10 +204,7 @@ const Chat: React.FC<ChatProps> = ({ navigation }) => {
       }
     });
 
-    console.log('✅ Listener registered successfully');
-
     return () => {
-      console.log('🔄 Removing IntentReceived listener');
       subscription.remove();
     };
   }, [user, isFocused]);
@@ -232,7 +217,6 @@ const Chat: React.FC<ChatProps> = ({ navigation }) => {
       }
 
       setIsLoading(true);
-      console.log('Starting to load WhatsApp export from URI:', uri);
 
       const zipFileUri = uri;
       let zipFilePath;
@@ -240,19 +224,15 @@ const Chat: React.FC<ChatProps> = ({ navigation }) => {
       // Handle different URI schemes
       if (Platform.OS === 'android' && zipFileUri.startsWith('content://')) {
         // content:// URIs need to be copied via ContentResolver
-        console.log('Converting content:// URI to file path...');
         const destPath = `${RNFS.TemporaryDirectoryPath}/${Math.random()}.zip`;
 
         try {
           // Use ContentResolverModule for content:// URIs (fixes WhatsApp permission issue)
           const { ContentResolverModule } = NativeModules;
           if (ContentResolverModule) {
-            console.log('Using ContentResolverModule to copy file...');
             await ContentResolverModule.copyContentUriToFile(zipFileUri, destPath);
-            console.log('✅ File copied using ContentResolver');
           } else {
             // Fallback to RNFS (may fail with WhatsApp URIs)
-            console.log('⚠️ ContentResolverModule not found, using RNFS...');
             await RNFS.copyFile(zipFileUri, destPath);
           }
         } catch (copyError: any) {
@@ -261,11 +241,9 @@ const Chat: React.FC<ChatProps> = ({ navigation }) => {
         }
 
         zipFilePath = destPath;
-        console.log('File copied to:', destPath);
       } else if (zipFileUri.startsWith('file://')) {
         // file:// URIs - strip the prefix to get raw path
         zipFilePath = zipFileUri.replace('file://', '');
-        console.log('Using file:// URI, stripped path:', zipFilePath);
       } else {
         // Raw file path
         zipFilePath = zipFileUri;
@@ -277,25 +255,16 @@ const Chat: React.FC<ChatProps> = ({ navigation }) => {
       // Check if the extraction folder already exists and delete it if it does
       const folderExists = await RNFS.exists(targetPath);
       if (folderExists) {
-        console.log('Removing old extracted directory...');
         await RNFS.unlink(targetPath);
       }
 
       // Unzip the file
-      console.log('Unzipping file...');
       const unzippedPath = await unzip(zipFilePath, targetPath);
-      console.log('Unzipped to:', unzippedPath);
 
-      console.log('Getting file information...');
       const filesMetaData = await getFilesInformation(unzippedPath);
-      console.log(
-        `Found ${filesMetaData.mediaFiles.length} media files and text file`,
-      );
 
       // Process the extracted chat file
-      console.log('Reading chat content...');
       const rawChatContent = await getFileContent(filesMetaData.textFile);
-      console.log('Chat content length:', rawChatContent.length);
 
       // Deterministic parser (NO LLM): build media map + parse sequentially.
       const mediaFilesMap = buildMediaFilesMap(
@@ -303,15 +272,12 @@ const Chat: React.FC<ChatProps> = ({ navigation }) => {
       );
       const parsed = parseWhatsAppChatTextDetailed(rawChatContent, mediaFilesMap);
 
-      console.log('Messages parsed:', parsed.messages.length);
-      console.log('Media linked:', parsed.mediaLinked);
       if (parsed.messages.length === 0) {
         const previewLines = rawChatContent
           .replace(/\r\n/g, '\n')
           .replace(/\r/g, '\n')
           .split('\n')
           .slice(0, 8);
-        console.log('Parser debug: first lines of chat.txt:', previewLines);
       }
 
       const parsedAsChatMessages: IMessage[] = parsed.messages.map(m => ({
@@ -417,14 +383,14 @@ const Chat: React.FC<ChatProps> = ({ navigation }) => {
   //         unzippedPath,
   //         route.params?.bookspecs,
   //       );
-  //       console.log('here 5');
+
   //       if (chatData) setChatData(chatData); // Update state with the new chat data
   //     }
   //   } catch (error) {
   //     if (DocumentPicker.isCancel(error)) {
-  //       console.log('User canceled the picker');
+
   //     } else {
-  //       console.error('Error picking ZIP file:', error);
+
   //     }
   //   } finally {
   //     setIsLoading(false);
@@ -465,7 +431,6 @@ const Chat: React.FC<ChatProps> = ({ navigation }) => {
             try {
               if (CustomIntent?.openApp) {
                 await CustomIntent.openApp('com.whatsapp');
-                console.log('WhatsApp launched successfully');
               } else {
                 Alert.alert(
                   'Not available',
@@ -474,7 +439,6 @@ const Chat: React.FC<ChatProps> = ({ navigation }) => {
                 );
               }
             } catch (error: any) {
-              console.warn('Could not open WhatsApp:', error?.message || '');
               Alert.alert(
                 'Could not open WhatsApp',
                 'Use "Pick exported ZIP file" to choose your chat export from the app.',
@@ -492,7 +456,6 @@ const Chat: React.FC<ChatProps> = ({ navigation }) => {
             try {
               if (CustomIntent?.openApp) {
                 await CustomIntent.openApp('com.whatsapp.w4b');
-                console.log('WhatsApp Business launched successfully');
               } else {
                 Alert.alert(
                   'Not available',
@@ -501,7 +464,6 @@ const Chat: React.FC<ChatProps> = ({ navigation }) => {
                 );
               }
             } catch (error: any) {
-              console.warn('Could not open WhatsApp Business:', error?.message || '');
               Alert.alert(
                 'Could not open WhatsApp Business',
                 'Use "Pick exported ZIP file" to choose your chat export from the app.',
@@ -573,6 +535,58 @@ const Chat: React.FC<ChatProps> = ({ navigation }) => {
     setSortOrder(filter[0]?.text == 'Newest First' ? 'nf' : 'of');
   };
 
+  // NEW: Get messages to display (filtered by date if dates selected)
+  const messagesToDisplay = React.useMemo(() => {
+    if (!dated || !datedTo) {
+      return chatMessages;
+    }
+    
+    // dated and datedTo are JavaScript Date objects from DateRangePicker
+    const fromDate = new Date(dated);
+    const toDate = new Date(datedTo);
+    // Set toDate to end of day so messages on that day are included
+    toDate.setHours(23, 59, 59, 999);
+    
+    const filtered = chatMessages.filter(m => {
+      const rawDate = m.date || m.sendingTime || '';
+      
+      // Parse DD/MM/YYYY format (WhatsApp date format)
+      let msgDate: Date | null = null;
+      if (rawDate.includes('/')) {
+        const parts = rawDate.split('/');
+        if (parts.length >= 3) {
+          const day = parseInt(parts[0], 10);
+          const month = parseInt(parts[1], 10) - 1; // months are 0-indexed
+          const year = parseInt(parts[2], 10);
+          msgDate = new Date(year, month, day);
+        }
+      } else if (rawDate) {
+        msgDate = new Date(rawDate);
+      }
+      
+      if (!msgDate || isNaN(msgDate.getTime())) {
+        return false;
+      }
+      
+      return msgDate >= fromDate && msgDate <= toDate;
+    });
+    
+    // Date filtering completed
+    
+    setChatDataFiltered(filtered);
+    return filtered;
+  }, [chatMessages, dated, datedTo]);
+
+  // Calculate scroll values after messagesToDisplay is defined
+  const estimatedTotalHeight = messagesToDisplay.length * ESTIMATED_ITEM_SIZE;
+  const stableMaxScroll = Math.max(1, estimatedTotalHeight - screenHeight);
+
+  const thumbPosition = scrollY.interpolate({
+    inputRange: [0, stableMaxScroll],
+    outputRange: [0, thumbTravel],
+    extrapolate: 'clamp',
+  });
+
   const deselectAll = (array: any, setArray: any) => {
     // Log the index to ensure it's correct
 
@@ -636,13 +650,7 @@ const Chat: React.FC<ChatProps> = ({ navigation }) => {
 
   const onSelectAll = () => {
     if (dated) {
-      // console.log("Filtered", chatDataFiltered);
-      // chatCardRefs.current.forEach((chatCardRef: any) => {
-      //   console.log("chatCardRef", chatCardRef);
-      //   if (chatCardRef && chatCardRef.check) {
-      //     chatCardRef.check();
-      //   }
-      // });
+
       select(chatMessages, chatDataFiltered);
       // });
       return;
@@ -675,6 +683,200 @@ const Chat: React.FC<ChatProps> = ({ navigation }) => {
     // });
   };
 
+  /**
+   * Upload a single book (media + messages)
+   * Returns { success: boolean, error?: string, qrMap, thumbnailMap }
+   */
+  const uploadSingleBook = async (
+    chatId: string,
+    bookChunk: BookChunk,
+    onProgress?: (percent: number) => void
+  ): Promise<{ success: boolean; error?: string; qrMap?: Record<string, string>; thumbnailMap?: Record<string, string> }> => {
+    try {
+      let qrMap: Record<string, string> = {};
+      let thumbnailMap: Record<string, string> = {};
+      let updatedChat: IChat | null = null;
+      
+      // Upload media files for this book
+      if (bookChunk.mediaFiles.length > 0) {
+        const data = new FormData();
+        bookChunk.mediaFiles.forEach((file: any) => {
+          const fileUri = file.path.startsWith('file://') ? file.path : `file://${file.path}`;
+          data.append('files', {
+            uri: fileUri,
+            name: file.name,
+            type: getMimeType(file.name),
+          } as any);
+        });
+        
+        const chatResponse = await uploadChatMedia(chatId, data, onProgress);
+        updatedChat = chatResponse.data.data;
+        qrMap = chatResponse.data.qrMap || {};
+        thumbnailMap = chatResponse.data.thumbnailMap || {};
+      }
+      
+      // Upload messages for this book
+      const messagesPayload = bookChunk.messages.map((m, messageIndex) => {
+        const payload: any = {
+          date: m.date || '',
+          messageType: ((m.messageType === 'unknown' ? 'text' : m.messageType) as MessageType),
+          senderName: m.senderName,
+          sendingTime: m.sendingTime,
+          text: m.text,
+        };
+        
+        // Media URL mapping
+        if ((m.messageType === 'image' || m.messageType === 'video' || m.messageType === 'audio') && m.localPath) {
+          const filename = m.localPath.split('/').pop();
+          
+          if (updatedChat?.mediaFiles && Array.isArray(updatedChat.mediaFiles)) {
+            let mediaCountBeforeThis = 0;
+            for (let i = 0; i < messageIndex; i++) {
+              const prevMsg = bookChunk.messages[i];
+              if ((prevMsg.messageType === 'image' || prevMsg.messageType === 'video' || prevMsg.messageType === 'audio') && prevMsg.localPath) {
+                mediaCountBeforeThis++;
+              }
+            }
+            
+            let uploadedFile = updatedChat.mediaFiles[mediaCountBeforeThis];
+            
+            if (uploadedFile && uploadedFile.name === filename) {
+              payload.url = uploadedFile.url;
+              if ((m.messageType === 'video' || m.messageType === 'audio') && filename && qrMap[filename]) {
+                payload.qrUrl = qrMap[filename];
+              }
+              if (m.messageType === 'video' && filename && thumbnailMap[filename]) {
+                payload.thumbnailUrl = thumbnailMap[filename];
+              }
+            } else {
+              uploadedFile = updatedChat.mediaFiles.find((mf: any) => mf.name === filename);
+              if (uploadedFile?.url) {
+                payload.url = uploadedFile.url;
+                if ((m.messageType === 'video' || m.messageType === 'audio') && filename && qrMap[filename]) {
+                  payload.qrUrl = qrMap[filename];
+                }
+                if (m.messageType === 'video' && filename && thumbnailMap[filename]) {
+                  payload.thumbnailUrl = thumbnailMap[filename];
+                }
+              }
+            }
+          }
+        }
+        
+        return payload;
+      });
+      
+
+      await bulkMessages(chatId, messagesPayload);
+      
+      return { success: true, qrMap, thumbnailMap };
+    } catch (error: any) {
+      console.error(`❌ Book ${bookChunk?.bookNumber || 'unknown'} upload failed:`, error);
+      return { success: false, error: error.message || 'Upload failed' };
+    }
+  };
+
+  /**
+   * Upload remaining books in background (non-blocking, SEQUENTIAL)
+   * Books upload ONE AT A TIME: Book 2 waits for Book 1, Book 3 waits for Book 2, etc.
+   */
+  const uploadRemainingBooksInBackground = (
+    chatId: string,
+    remainingBooks: BookChunk[],
+    totalBooks: number
+  ) => {
+    // Use setTimeout to make it non-blocking (don't block navigation)
+    setTimeout(async () => {
+      // Upload books SEQUENTIALLY (one at a time)
+      for (let i = 0; i < remainingBooks.length; i++) {
+        const book = remainingBooks[i];
+        
+        try {
+          // Update status to "uploading"
+          dispatch(updateBookUploadStatus({
+            chatId,
+            bookNumber: book.bookNumber,
+            status: 'uploading',
+            progress: 0,
+          }));
+          
+          // AWAIT here ensures Book 2 waits for Book 1 to finish
+          const result = await uploadSingleBook(chatId, book, (progress) => {
+            // Update progress in Redux
+            dispatch(updateBookUploadStatus({
+              chatId,
+              bookNumber: book.bookNumber,
+              status: 'uploading',
+              progress,
+            }));
+          });
+          
+          if (result.success) {
+            // Merge qrUrl and thumbnailUrl into messages
+            const finalMessages = book.messages.map(m => {
+              if ((m.messageType === 'video' || m.messageType === 'audio') && m.localPath) {
+                const filename = m.localPath.split('/').pop();
+                const updates: any = {};
+                if (filename && result.qrMap && result.qrMap[filename]) {
+                  updates.qrUrl = result.qrMap[filename];
+                }
+                if (m.messageType === 'video' && filename && result.thumbnailMap && result.thumbnailMap[filename]) {
+                  updates.thumbnailUrl = result.thumbnailMap[filename];
+                }
+                if (Object.keys(updates).length > 0) {
+                  return { ...m, ...updates };
+                }
+              }
+              return m;
+            });
+            
+            // Update status to "completed"
+            dispatch(updateBookUploadStatus({
+              chatId,
+              bookNumber: book.bookNumber,
+              status: 'completed',
+              progress: 100,
+            }));
+            
+            // Add messages to Redux
+            dispatch(appendBookMessages({
+              chatId,
+              bookNumber: book.bookNumber,
+              messages: finalMessages,
+            }));
+            
+          } else {
+            console.error(`❌ Book ${book.bookNumber} upload failed: ${result.error}`);
+            
+            // Update status to "failed"
+            dispatch(updateBookUploadStatus({
+              chatId,
+              bookNumber: book.bookNumber,
+              status: 'failed',
+              progress: 0,
+              error: result.error,
+            }));
+            
+            // STOP uploading remaining books if one fails
+            break;
+          }
+          
+        } catch (error: any) {
+          dispatch(updateBookUploadStatus({
+            chatId,
+            bookNumber: book.bookNumber,
+            status: 'failed',
+            progress: 0,
+            error: error.message,
+          }));
+          
+          // STOP uploading remaining books if one fails
+          break;
+        }
+      }
+    }, 100); // Start background upload after 100ms (non-blocking)
+  };
+
   const onPressDone = async () => {
     try {
       if (!user?._id) return;
@@ -704,181 +906,418 @@ const Chat: React.FC<ChatProps> = ({ navigation }) => {
       }
 
       setIsSubmitting(true);
-      let updatedChat: IChat | null = null;
 
-      let qrMap: Record<string, string> = {};
-      let thumbnailMap: Record<string, string> = {};
-
-      if (whatsappChatData?.mediaFiles?.length) {
-        const data = new FormData();
-        whatsappChatData.mediaFiles.forEach(file => {
-          const fileUri = file.path.startsWith('file://')
-            ? file.path
-            : `file://${file.path}`;
-
-          data.append('files', {
-            uri: fileUri,
-            name: file.name,
-            type: getMimeType(file.name),
-          });
-        });
-
-        const chatResponse = await uploadChatMedia(chatToUse._id, data, (percent) => {
-          setUploadProgress(percent);
-          // When upload reaches 100%, show processing state
-          if (percent === 100) {
-            setIsProcessing(true);
-          }
-        });
-        updatedChat = chatResponse.data.data;
-        qrMap = chatResponse.data.qrMap || {};
-        thumbnailMap = chatResponse.data.thumbnailMap || {};
-
-        if (updatedChat) {
-          setChat(updatedChat);
-          chatToUse = updatedChat;
-          setUploadProgress(0);
-          setIsProcessing(false);
-        }
-      }
-
-      // Filter only checked messages
-      const checkedMessages = chatMessages.filter(m => m.isCheck === true);
+      // Filter only checked messages (from displayed messages, respecting date filter)
+      const checkedMessages = messagesToDisplay.filter(m => m.isCheck === true);
       
-      const messagesPayload = checkedMessages.map((m, messageIndex) => {
-        const payload: any = {
-          date: m.date || '',
-          messageType: ((m.messageType === 'unknown' ? 'text' : m.messageType) as MessageType),
-          senderName: m.senderName,
-          sendingTime: m.sendingTime,
-          text: m.text,
+      const format = (route?.params as any)?.format || 'standard_14_8x21';
+      
+      // Calculate if multi-book (> 200 pages)
+      const estimatedPages = estimatePages(checkedMessages, format);
+      console.log(`📚 estimatedPages: ${estimatedPages}, format: ${format}`);
+      
+      if (estimatedPages > 200) {
+        // ========================================
+        // MULTI-BOOK FLOW (> 200 pages)
+        // ========================================
+        console.log(`📚 ========== MULTI-BOOK FLOW START ==========`);
+        console.log(`📚 Total estimated pages: ${estimatedPages}`);
+        console.log(`📚 Total media files: ${whatsappChatData?.mediaFiles?.length || 0}`);
+        console.log(`📚 Format: ${format}`);
+        
+        const bookChunks = splitIntoBooksWithMedia(
+          checkedMessages,
+          whatsappChatData?.mediaFiles || [],
+          200,
+          format
+        );
+        
+        console.log(`📚 Created ${bookChunks.length} book chunks:`);
+        bookChunks.forEach((book, index) => {
+          console.log(`📚 Book ${book.bookNumber}: ${book.messages.length} messages, ~${book.estimatedPages} pages`);
+        });
+        
+        // Book chunks created
+        
+        // Upload Book 1 first (BLOCKING - user waits)
+        const book1Result = await uploadSingleBook(
+          chatToUse._id, 
+          bookChunks[0],
+          (progress) => {
+            setUploadProgress(progress);
+            if (progress === 100) {
+              setIsProcessing(true);
+            }
+          }
+        );
+        
+        if (!book1Result.success) {
+          Alert.alert('Error', `Book 1 upload failed: ${book1Result.error}`);
+          setIsSubmitting(false);
+          return;
+        }
+        
+        // Merge qrUrl and thumbnailUrl into Book 1 messages
+        const book1FinalMessages = bookChunks[0].messages.map(m => {
+          if ((m.messageType === 'video' || m.messageType === 'audio') && m.localPath) {
+            const filename = m.localPath.split('/').pop();
+            const updates: any = {};
+            if (filename && book1Result.qrMap && book1Result.qrMap[filename]) {
+              updates.qrUrl = book1Result.qrMap[filename];
+            }
+            if (m.messageType === 'video' && filename && book1Result.thumbnailMap && book1Result.thumbnailMap[filename]) {
+              updates.thumbnailUrl = book1Result.thumbnailMap[filename];
+            }
+            if (Object.keys(updates).length > 0) {
+              return { ...m, ...updates };
+            }
+          }
+          return m;
+        });
+        
+        console.log(`📚 Book 1 final messages prepared: ${book1FinalMessages.length} messages`);
+        console.log(`📚 chatToUse structure prepared`);
+        console.log(`📚 bookConfig ready`);
+        
+        // Prepare books metadata for navigation
+        const booksMetadata = bookChunks.map((b, index) => {
+          return {
+            bookNumber: b.bookNumber || (index + 1),
+            messageCount: b.messages?.length || 0,
+            estimatedPages: b.estimatedPages || 0,
+            dateRange: b.dateRange || { from: '', to: '' },
+          };
+        });
+        
+        console.log(`📚 Books metadata prepared:`, booksMetadata);
+        
+        // Save Book 1 to Redux - create a clean chat object
+        const finalChat: IChat = {
+          _id: chatToUse._id,
+          author: chatToUse.author,
+          mediaFiles: chatToUse.mediaFiles || [],
+          createdAt: chatToUse.createdAt,
+          updatedAt: chatToUse.updatedAt,
+          platform: 'whatsapp',
+          totalMessages: book1FinalMessages.length,
+          status: 'active',
+          importedAt: new Date().toISOString(),
+          bookConfig: bookConfig || {
+            fontFamily: fonts.ROBOTO.Medium,
+            fontSize: 10,
+            fontStyle: 'regular',
+            chatBackground: '#E5DDD5',
+            hideName: false,
+            senderBackground: '#D9FDD3',
+            senderTextColor: '#111B21',
+            receiverBackground: '#FFFFFF',
+            receiverTextColor: '#111B21',
+            dateFormat: 'DD/MM/YYYY hh:mm A',
+          },
         };
-
-        // If message has media (image/video/audio), find the uploaded URL from chat
-        if ((m.messageType === 'image' || m.messageType === 'video' || m.messageType === 'audio') && m.localPath) {
-          // Extract filename from localPath
-          const filename = m.localPath.split('/').pop();
+        
+        console.log(`📚 Final chat prepared with bookConfig`);
+        
+        try {
+          dispatch(saveCurrentChat(finalChat));
+          console.log(`📚 saveCurrentChat dispatched successfully`);
+        } catch (err) {
+          console.error(`📚 Error in saveCurrentChat:`, err);
+          throw err;
+        }
+        
+        try {
+          dispatch(saveCurrentChatMessages(book1FinalMessages));
+          console.log(`📚 saveCurrentChatMessages dispatched successfully`);
+        } catch (err) {
+          console.error(`📚 Error in saveCurrentChatMessages:`, err);
+          throw err;
+        }
+        
+        const chatIdStr = chatToUse?._id || '';
+        console.log(`📚 Redux saved. Dispatching status updates...`);
+        console.log(`📚 chatIdStr: ${chatIdStr}`);
+        console.log(`📚 bookChunks length: ${bookChunks.length}`);
+        
+        if (!chatIdStr) {
+          Alert.alert('Error', 'Chat ID is missing. Please try again.');
+          setIsSubmitting(false);
+          return;
+        }
+        
+        // Validate bookChunks structure
+        if (!bookChunks || bookChunks.length === 0) {
+          Alert.alert('Error', 'Book chunks are missing. Please try again.');
+          setIsSubmitting(false);
+          return;
+        }
+        
+        // Clear any existing book data for this chat (fresh start)
+        try {
+          dispatch(clearBookData({ chatId: chatIdStr }));
+        } catch (err) {
+          console.error('Error clearing book data:', err);
+        }
+        
+        // Small delay to ensure Redux state is ready
+        await new Promise(resolve => setTimeout(resolve, 100));
+        
+        // Initialize Book 1 status as completed
+        try {
+          if (!chatIdStr) {
+            throw new Error('Chat ID is missing');
+          }
           
-          if (chatToUse.mediaFiles && Array.isArray(chatToUse.mediaFiles)) {
-            // Count how many media messages came before this one IN CHECKED MESSAGES
-            let mediaCountBeforeThis = 0;
-            for (let i = 0; i < messageIndex; i++) {
-              const prevMsg = checkedMessages[i];
-              if ((prevMsg.messageType === 'image' || prevMsg.messageType === 'video' || prevMsg.messageType === 'audio') && prevMsg.localPath) {
-                mediaCountBeforeThis++;
-              }
+          if (!book1FinalMessages || book1FinalMessages.length === 0) {
+            throw new Error('Book 1 messages are missing');
+          }
+          
+          console.log('🔧 DEBUG: About to dispatch updateBookUploadStatus for Book 1');
+          console.log('🔧 DEBUG: chatIdStr:', chatIdStr);
+          console.log('🔧 DEBUG: book1FinalMessages length:', book1FinalMessages.length);
+          
+          dispatch(updateBookUploadStatus({
+            chatId: chatIdStr,
+            bookNumber: 1,
+            status: 'completed',
+            progress: 100,
+          }));
+          
+          console.log('🔧 DEBUG: Successfully dispatched updateBookUploadStatus for Book 1');
+
+        } catch (err) {
+          console.error(`📚 Error dispatching Book 1 status:`, err);
+        }
+        
+        // Store Book 1 messages
+        try {
+          if (!chatIdStr || !book1FinalMessages || book1FinalMessages.length === 0) {
+            throw new Error('Invalid data for Book 1 messages');
+          }
+          
+          console.log('🔧 DEBUG: About to dispatch appendBookMessages for Book 1');
+          
+          dispatch(appendBookMessages({
+            chatId: chatIdStr,
+            bookNumber: 1,
+            messages: book1FinalMessages,
+          }));
+          
+          console.log('🔧 DEBUG: Successfully dispatched appendBookMessages for Book 1');
+
+        } catch (err) {
+          console.error(`📚 Error appending Book 1 messages:`, err);
+        }
+        
+        // Initialize remaining books as pending
+        for (let i = 1; i < bookChunks.length; i++) {
+          const book = bookChunks[i];
+          
+          if (!book || !book.bookNumber) {
+            console.error(`📚 Invalid book at index ${i}:`, book);
+            continue;
+          }
+          
+          try {
+            if (!chatIdStr) {
+              throw new Error('Chat ID is missing');
             }
             
-            // Try index-based matching first (handles duplicate filenames)
-            let uploadedFile = chatToUse.mediaFiles[mediaCountBeforeThis];
+            if (typeof book.bookNumber !== 'number' || book.bookNumber < 1) {
+              throw new Error(`Invalid book number: ${book.bookNumber}`);
+            }
             
-            // Verify filename matches (safety check)
-            if (uploadedFile && uploadedFile.name === filename) {
-              payload.url = uploadedFile.url;
-              // Attach qrUrl for video/audio
-              if ((m.messageType === 'video' || m.messageType === 'audio') && filename && qrMap[filename]) {
-                payload.qrUrl = qrMap[filename];
+            console.log(`🔧 DEBUG: About to dispatch updateBookUploadStatus for Book ${book.bookNumber}`);
+            
+            dispatch(updateBookUploadStatus({
+              chatId: chatIdStr,
+              bookNumber: book.bookNumber,
+              status: 'pending',
+              progress: 0,
+            }));
+            
+            console.log(`🔧 DEBUG: Successfully dispatched updateBookUploadStatus for Book ${book.bookNumber}`);
+          } catch (err) {
+            console.error(`📚 Error dispatching status for book ${book.bookNumber}:`, err);
+          }
+        }
+        console.log(`📚 All books initialized`);
+        
+        // Navigate to PageSelection immediately after Book 1
+        console.log(`📚 Navigating to PageSelection...`);
+        navigation.navigate('PageSelection', {
+          chatId: chatIdStr,
+          format: format,
+          bookspecs: (route?.params as any)?.bookspecs,
+          books: booksMetadata,
+        });
+        
+        setIsSubmitting(false);
+        setUploadProgress(0);
+        setIsProcessing(false);
+        
+        // Upload remaining books in background (NON-BLOCKING)
+        if (bookChunks.length > 1) {
+          uploadRemainingBooksInBackground(
+            chatIdStr, 
+            bookChunks.slice(1),
+            bookChunks.length
+          );
+        }
+        
+      } else {
+        // ========================================
+        // SINGLE-BOOK FLOW (≤ 200 pages)
+        // NO CHANGES - Use existing logic
+        // ========================================
+        console.log(`📖 Single book - no split needed (${estimatedPages} pages)`);
+        
+        let updatedChat: IChat | null = null;
+        let qrMap: Record<string, string> = {};
+        let thumbnailMap: Record<string, string> = {};
+
+        // Filter media files to only those referenced by checked messages
+        const filteredMediaFiles = (whatsappChatData?.mediaFiles || []).filter(file => {
+          return checkedMessages.some(m => 
+            (m.messageType === 'image' || m.messageType === 'video' || m.messageType === 'audio') &&
+            m.localPath &&
+            m.localPath.split('/').pop() === file.name
+          );
+        });
+        
+
+
+        if (filteredMediaFiles.length > 0) {          const data = new FormData();
+          filteredMediaFiles.forEach(file => {
+            const fileUri = file.path.startsWith('file://')
+              ? file.path
+              : `file://${file.path}`;
+
+            data.append('files', {
+              uri: fileUri,
+              name: file.name,
+              type: getMimeType(file.name),
+            });
+          });
+
+          const chatResponse = await uploadChatMedia(chatToUse._id, data, (percent) => {
+            setUploadProgress(percent);
+            if (percent === 100) {
+              setIsProcessing(true);
+            }
+          });
+          updatedChat = chatResponse.data.data;
+          qrMap = chatResponse.data.qrMap || {};
+          thumbnailMap = chatResponse.data.thumbnailMap || {};
+
+          if (updatedChat) {
+            setChat(updatedChat);
+            chatToUse = updatedChat;
+            setUploadProgress(0);
+            setIsProcessing(false);
+          }
+        }
+
+        // Upload messages
+        const messagesPayload = checkedMessages.map((m, messageIndex) => {
+          const payload: any = {
+            date: m.date || '',
+            messageType: ((m.messageType === 'unknown' ? 'text' : m.messageType) as MessageType),
+            senderName: m.senderName,
+            sendingTime: m.sendingTime,
+            text: m.text,
+          };
+
+          // Media URL mapping logic (existing)
+          if ((m.messageType === 'image' || m.messageType === 'video' || m.messageType === 'audio') && m.localPath) {
+            const filename = m.localPath.split('/').pop();
+            
+            if (chatToUse.mediaFiles && Array.isArray(chatToUse.mediaFiles)) {
+              let mediaCountBeforeThis = 0;
+              for (let i = 0; i < messageIndex; i++) {
+                const prevMsg = checkedMessages[i];
+                if ((prevMsg.messageType === 'image' || prevMsg.messageType === 'video' || prevMsg.messageType === 'audio') && prevMsg.localPath) {
+                  mediaCountBeforeThis++;
+                }
               }
-              // Attach thumbnailUrl for videos only
-              if (m.messageType === 'video' && filename && thumbnailMap[filename]) {
-                payload.thumbnailUrl = thumbnailMap[filename];
-              }
-            } else {
-              // Fallback: search by filename only
-              uploadedFile = chatToUse.mediaFiles.find((mf: any) => mf.name === filename);
-              if (uploadedFile?.url) {
+              
+              let uploadedFile = chatToUse.mediaFiles[mediaCountBeforeThis];
+              
+              if (uploadedFile && uploadedFile.name === filename) {
                 payload.url = uploadedFile.url;
                 if ((m.messageType === 'video' || m.messageType === 'audio') && filename && qrMap[filename]) {
                   payload.qrUrl = qrMap[filename];
                 }
-                // Attach thumbnailUrl for videos only
                 if (m.messageType === 'video' && filename && thumbnailMap[filename]) {
                   payload.thumbnailUrl = thumbnailMap[filename];
+                }
+              } else {
+                uploadedFile = chatToUse.mediaFiles.find((mf: any) => mf.name === filename);
+                if (uploadedFile?.url) {
+                  payload.url = uploadedFile.url;
+                  if ((m.messageType === 'video' || m.messageType === 'audio') && filename && qrMap[filename]) {
+                    payload.qrUrl = qrMap[filename];
+                  }
+                  if (m.messageType === 'video' && filename && thumbnailMap[filename]) {
+                    payload.thumbnailUrl = thumbnailMap[filename];
+                  }
                 }
               }
             }
           }
-        }
 
-        return payload;
-      });
-
-      await bulkMessages(chatToUse._id, messagesPayload);
-
-      const finalChat = { ...(updatedChat || chatToUse), bookConfig: bookConfig };
-      // Merge qrUrl and thumbnailUrl into local messages so Redux has them for preview - ONLY CHECKED MESSAGES
-      const finalMessages = checkedMessages.map(m => {
-        if ((m.messageType === 'video' || m.messageType === 'audio') && m.localPath) {
-          const filename = m.localPath.split('/').pop();
-          const updates: any = {};
-          if (filename && qrMap[filename]) {
-            updates.qrUrl = qrMap[filename];
-          }
-          if (m.messageType === 'video' && filename && thumbnailMap[filename]) {
-            updates.thumbnailUrl = thumbnailMap[filename];
-          }
-          if (Object.keys(updates).length > 0) {
-            return { ...m, ...updates };
-          }
-        }
-        return m;
-      });
-
-      // Generate a unique ID for this saved chat
-      const savedChatId = uuidv4();
-
-      // Save to current chat (for immediate viewing)
-      dispatch(saveCurrentChat(finalChat));
-      dispatch(saveCurrentChatMessages(finalMessages));
-
-      // Save to savedChats array (for persistence as separate cards)
-      dispatch(
-        saveChat({
-          id: savedChatId,
-          chat: {
-            ...finalChat,
-            messages: finalMessages,
-            timestamp: new Date().toISOString(),
-          },
-        }),
-      );
-
-      // Check if we're in photo book flow
-      const photoBookFlow = route?.params?.photoBookFlow;
-      const format = route?.params?.format;
-      const bookspecs = route?.params?.bookspecs;
-
-      if (photoBookFlow && finalChat?._id) {
-        // NEW: Calculate books metadata for multi-book support
-        const estimatedPages = estimatePages(finalMessages, format || 'standard_14_8x21');
-        let booksMetadata = undefined;
-        
-        if (estimatedPages > 200) {
-          const splitBooks = splitIntoBooks(finalMessages, 200);
-          booksMetadata = splitBooks.map(b => ({
-            bookNumber: b.bookNumber,
-            messageCount: b.messages.length,
-            estimatedPages: b.estimatedPages,
-            dateRange: b.dateRange,
-          }));
-          
-          console.log(`📚 Chat will be split into ${booksMetadata.length} books`);
-        }
-        
-        // Navigate to PageSelection instead of going back
-        navigation.navigate('PageSelection', {
-          chatId: finalChat._id,
-          format: format,
-          bookspecs: bookspecs,
-          books: booksMetadata, // NEW: Pass books metadata
+          return payload;
         });
-      } else {
-        navigation.goBack();
-      }
 
-      // console.log('Messages uploaded', response.data.data);
+        await bulkMessages(chatToUse._id, messagesPayload);
+
+        const finalChat = { ...(updatedChat || chatToUse), bookConfig: bookConfig };
+        const finalMessages = checkedMessages.map(m => {
+          if ((m.messageType === 'video' || m.messageType === 'audio') && m.localPath) {
+            const filename = m.localPath.split('/').pop();
+            const updates: any = {};
+            if (filename && qrMap[filename]) {
+              updates.qrUrl = qrMap[filename];
+            }
+            if (m.messageType === 'video' && filename && thumbnailMap[filename]) {
+              updates.thumbnailUrl = thumbnailMap[filename];
+            }
+            if (Object.keys(updates).length > 0) {
+              return { ...m, ...updates };
+            }
+          }
+          return m;
+        });
+
+        const savedChatId = uuidv4();
+        dispatch(saveCurrentChat(finalChat));
+        dispatch(saveCurrentChatMessages(finalMessages));
+        dispatch(
+          saveChat({
+            id: savedChatId,
+            chat: {
+              ...finalChat,
+              messages: finalMessages,
+              timestamp: new Date().toISOString(),
+            },
+          }),
+        );
+
+        const photoBookFlow = (route?.params as any)?.photoBookFlow;
+
+        if (photoBookFlow && finalChat?._id) {
+          navigation.navigate('PageSelection', {
+            chatId: finalChat._id,
+            format: format,
+            bookspecs: (route?.params as any)?.bookspecs,
+          });
+        } else {
+          navigation.goBack();
+        }
+      }
+      
     } catch (error) {
-      console.log('Messages upload failed :: ', error);
+      console.error('Upload failed:', error);
       Alert.alert('Error', 'Chat not saved correctly. Please try again.');
     } finally {
       setIsSubmitting(false);
@@ -942,7 +1381,7 @@ const Chat: React.FC<ChatProps> = ({ navigation }) => {
     //   return item != undefined;
     // });
 
-    // console.log('Filter length', filter.length);
+
 
     // let chatBubbles = await Promise.all(
     //   filter.map((item: any, index: number) => {
@@ -950,7 +1389,7 @@ const Chat: React.FC<ChatProps> = ({ navigation }) => {
     //   }),
     // );
 
-    // // console.log('Added ID:', JSON.stringify(addedId, null, 2));
+
 
     // // // return;
 
@@ -970,9 +1409,9 @@ const Chat: React.FC<ChatProps> = ({ navigation }) => {
     );
   }, []);
 
-  // Scroll to a specific message by ID
+  // Scroll to a specific message by ID (in displayed messages)
   const scrollToMessage = useCallback((messageId: string) => {
-    const index = chatMessages.findIndex(msg => msg._id === messageId);
+    const index = messagesToDisplay.findIndex(msg => msg._id === messageId);
     if (index !== -1 && scrollViewRef.current) {
       scrollViewRef.current.scrollToIndex({
         index,
@@ -980,12 +1419,12 @@ const Chat: React.FC<ChatProps> = ({ navigation }) => {
         viewPosition: 0.5, // Center the message on screen
       });
     }
-  }, [chatMessages]);
+  }, [messagesToDisplay]);
 
-  // Search functionality: Find all matching messages
+  // Search functionality: Find all matching messages (in displayed messages only)
   useEffect(() => {
     if (search.trim()) {
-      const matches = chatMessages
+      const matches = messagesToDisplay
         .filter(msg => 
           msg.text?.toLowerCase().includes(search.toLowerCase())
         )
@@ -1002,7 +1441,7 @@ const Chat: React.FC<ChatProps> = ({ navigation }) => {
       setSearchMatches([]);
       setCurrentMatchIndex(-1);
     }
-  }, [search, chatMessages, scrollToMessage]);
+  }, [search, messagesToDisplay, scrollToMessage]);
 
   // Navigate to next search match
   const handleNextMatch = useCallback(() => {
@@ -1072,7 +1511,7 @@ const Chat: React.FC<ChatProps> = ({ navigation }) => {
                 [
                   {
                     text: 'No',
-                    onPress: () => console.log('Cancel Pressed'),
+                    onPress: () => {},
                     style: 'cancel', // Optional: styles the button as a cancel button
                   },
                   {
@@ -1096,7 +1535,7 @@ const Chat: React.FC<ChatProps> = ({ navigation }) => {
                 [
                   {
                     text: 'No',
-                    onPress: () => console.log('Cancel Pressed'),
+                    onPress: () => {},
                     style: 'cancel', // Optional: styles the button as a cancel button
                   },
                   {
@@ -1137,14 +1576,14 @@ const Chat: React.FC<ChatProps> = ({ navigation }) => {
           </Text>
         </>
       ) : null}
-      {chatMessages.length > 0 ? (
+      {messagesToDisplay.length > 0 ? (
 
         <>
           <FlashList
             ref={scrollViewRef}
-            data={chatMessages}
+            data={messagesToDisplay}
             renderItem={renderChats}
-            extraData={{search, searchMatches, currentMatchIndex}} // Force re-render on search changes
+            extraData={{search, searchMatches, currentMatchIndex, dated, datedTo}} // Force re-render on search/date changes
             getItemType={item => {
               if (item.messageType) return item.messageType;
               return 'text';
@@ -1196,6 +1635,14 @@ const Chat: React.FC<ChatProps> = ({ navigation }) => {
             )}
           </TouchableOpacity>
         </>
+      ) : chatMessages.length > 0 ? (
+        // Show message when date filter returns no results
+        <View style={styles.loaderContainer}>
+          <Text style={{ color: 'black', textAlign: 'center', marginTop: 50 }}>
+            No messages found in selected date range.{'\n'}
+            Try adjusting the date filter or clear it to see all messages.
+          </Text>
+        </View>
       ) : (
         <>
           <TouchableOpacity onPress={handlePickFolder}>
@@ -1215,7 +1662,6 @@ const Chat: React.FC<ChatProps> = ({ navigation }) => {
             </Text>
           </TouchableOpacity>
 
-
           {/* <TouchableOpacity
             onPress={handlePickFolderTest}
             style={{marginTop: 10}}>
@@ -1232,7 +1678,7 @@ const Chat: React.FC<ChatProps> = ({ navigation }) => {
       )}
       {!searchBarState && (
         <>
-          {chatMessages?.length > 0 ? (
+          {messagesToDisplay?.length > 0 ? (
             <TouchableOpacity
               style={styles.threeDotIcnContainer}
               onPress={() => setShowSelectionModal(true)}>
@@ -1243,7 +1689,7 @@ const Chat: React.FC<ChatProps> = ({ navigation }) => {
       )}
       {!searchBarState && (
         <View style={styles.bottomButtonContainer}>
-          {chatMessages?.length > 0 ? (
+          {messagesToDisplay?.length > 0 ? (
             <CustomButton
               text="Edit"
               oddContainerStyle={styles.customButtonOddContainer}
@@ -1338,8 +1784,7 @@ const Chat: React.FC<ChatProps> = ({ navigation }) => {
         setShowSortMessageModal={setShowSortMessageModal}
         showSortMessageModal={showSortMessageModal}
         setShowEditModal={setShowEditModal}
-        returnSorted={val => {
-          console.log('val', val);
+        returnSorted={(val: any) => {
           sortMessages(val);
         }}
       />

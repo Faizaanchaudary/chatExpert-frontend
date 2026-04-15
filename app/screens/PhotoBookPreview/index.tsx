@@ -30,6 +30,7 @@ import {
   loadThemeConfigForProject,
   setSavingTheme,
 } from '../../store/Slice/themeConfigSlice';
+import { updateBookUploadStatus } from '../../store/Slice/chatSlice';
 import { themes, resolveThemeConfig, getTheme, ThemeConfigStored } from '../../themes';
 import { BookPreviewPages } from './BookPreviewPages';
 import { ThemeSelector } from './ThemeSelector';
@@ -81,6 +82,13 @@ const PhotoBookPreview: React.FC<PhotoBookPreviewProps> = ({
   const reduxMessages = useAppSelector((state: any) => state?.chats?.chatMessages) as
     | IMessage[]
     | undefined;
+  // NEW: Get book upload status from Redux
+  const bookUploadStatus = useAppSelector(
+    (state: any) => state?.chats?.bookUploadStatus?.[chatId] || {}
+  );
+  const bookMessages = useAppSelector(
+    (state: any) => state?.chats?.bookMessages?.[chatId] || {}
+  );
   const dispatch = useAppDispatch();
 
   const themeId = themeConfigState?.themeId ?? 'classic';
@@ -94,26 +102,72 @@ const PhotoBookPreview: React.FC<PhotoBookPreviewProps> = ({
     }
   }, [photoBook]);
 
+  // NEW: Check if all books are uploaded
+  const allBooksUploaded = React.useMemo(() => {
+    if (!photoBook?.books || photoBook.books.length === 0) return true; // Single book
+    
+    return photoBook.books.every((book: any) => {
+      const status = bookUploadStatus[book.bookNumber];
+      return status && status.status === 'completed';
+    });
+  }, [photoBook, bookUploadStatus]);
+
   // NEW: Filter messages for current book
   const currentBookMessages = React.useMemo(() => {
+    console.log(`🔍 Book ${currentBookNumber}: photoBook.books length:`, photoBook?.books?.length || 0);
+    
     if (!photoBook?.books || photoBook.books.length === 0) {
+      console.log('🔍 Single book mode - returning all messages');
       return messages; // Single book - show all messages
     }
     
-    // Multi-book: calculate message range for current book
-    const book = photoBook.books.find((b: any) => b.bookNumber === currentBookNumber);
-    if (!book) return messages;
+    // Multi-book: Try to get messages from Redux first
+    const bookMsgs = bookMessages[currentBookNumber];
     
-    // Calculate start/end indices based on book metadata
+    if (bookMsgs && bookMsgs.length > 0) {
+      console.log(`🔍 Book ${currentBookNumber}: Using Redux messages (${bookMsgs.length} messages)`);
+      return bookMsgs;
+    }
+    
+    // Fallback: filter from all messages (if not in Redux yet)
+    const book = photoBook.books.find((b: any) => b.bookNumber === currentBookNumber);
+    
+    if (!book) {
+      console.log(`🔍 Book ${currentBookNumber}: Not found!`);
+      return [];
+    }
+    
     let startIndex = 0;
     for (let i = 0; i < currentBookNumber - 1; i++) {
-      const prevBook = photoBook.books[i];
-      startIndex += prevBook.messageCount;
+      startIndex += photoBook.books[i].messageCount;
     }
     const endIndex = startIndex + book.messageCount;
     
-    return messages.slice(startIndex, endIndex);
-  }, [messages, photoBook, currentBookNumber]);
+    console.log(`🔍 Book ${currentBookNumber}: Slicing ${startIndex}-${endIndex} (${endIndex - startIndex} messages)`);
+    const slicedMessages = messages.slice(startIndex, endIndex);
+    
+    return slicedMessages;
+  }, [messages, photoBook, currentBookNumber, bookMessages]);
+
+  // Add console logs for page calculation comparison
+  React.useEffect(() => {
+    if (currentBookMessages && currentBookMessages.length > 0) {
+      const previewPageCount = pageCount || photoBook?.pageCount || 30;
+      console.log(`📄 PAGE CALCULATION COMPARISON:`);
+      console.log(`📄 Book ${currentBookNumber}: ${currentBookMessages.length} messages`);
+      console.log(`📄 Preview showing: ${previewPageCount} pages`);
+      console.log(`📄 Route pageCount:`, pageCount);
+      console.log(`📄 PhotoBook pageCount:`, photoBook?.pageCount);
+      
+      if (photoBook?.books && photoBook.books.length > 0) {
+        const currentBook = photoBook.books.find((b: any) => b.bookNumber === currentBookNumber);
+        if (currentBook) {
+          console.log(`📄 Book metadata estimatedPages: ${currentBook.estimatedPages}`);
+          console.log(`📄 Book metadata messageCount: ${currentBook.messageCount}`);
+        }
+      }
+    }
+  }, [currentBookMessages, currentBookNumber, pageCount, photoBook]);
 
   const loadPhotoBook = useCallback(async () => {
     if (!photoBookId) return;
@@ -303,6 +357,50 @@ const PhotoBookPreview: React.FC<PhotoBookPreviewProps> = ({
     setTitleEditorVisible(true);
   };
 
+  // NEW: Retry upload for failed book
+  const handleRetryUpload = async (bookNumber: number) => {
+    Alert.alert(
+      'Retry Upload',
+      `Retry uploading Book ${bookNumber}?`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Retry',
+          onPress: async () => {
+            try {
+              console.log(`🔄 Retrying Book ${bookNumber}...`);
+              
+              // Update status to "uploading"
+              dispatch(updateBookUploadStatus({
+                chatId,
+                bookNumber,
+                status: 'uploading',
+                progress: 0,
+              }));
+              
+              // TODO: Implement actual retry logic
+              // This would need to re-fetch the book chunk data and re-upload
+              // For now, just show a message
+              Alert.alert('Info', 'Retry functionality will be implemented. Please restart the upload from the chat screen.');
+              
+              // Reset to failed state for now
+              dispatch(updateBookUploadStatus({
+                chatId,
+                bookNumber,
+                status: 'failed',
+                progress: 0,
+                error: 'Retry not yet implemented',
+              }));
+              
+            } catch (error: any) {
+              Alert.alert('Error', `Retry failed: ${error.message}`);
+            }
+          },
+        },
+      ]
+    );
+  };
+
   const handleSaveTitles = (customTitles: any) => {
     console.log('📥 Received titles in index.tsx:', JSON.stringify(customTitles, null, 2));
     dispatch(
@@ -443,31 +541,79 @@ const PhotoBookPreview: React.FC<PhotoBookPreviewProps> = ({
           </View>
 
           <View style={styles.previewSection}>
-            {/* NEW: Book Selector for multi-book */}
+            {/* NEW: Book Selector for multi-book with upload status */}
             {totalBooks > 1 && (
               <View style={styles.bookSelector}>
                 <Text style={styles.bookSelectorTitle}>Select Book:</Text>
                 <View style={styles.bookButtons}>
-                  {Array.from({ length: totalBooks }, (_, i) => i + 1).map(bookNum => (
-                    <TouchableOpacity
-                      key={bookNum}
-                      style={[
-                        styles.bookButton,
-                        currentBookNumber === bookNum && styles.bookButtonActive,
-                      ]}
-                      onPress={() => setCurrentBookNumber(bookNum)}
-                    >
-                      <Text
-                        style={[
-                          styles.bookButtonText,
-                          currentBookNumber === bookNum && styles.bookButtonTextActive,
-                        ]}
-                      >
-                        Book {bookNum}
-                      </Text>
-                    </TouchableOpacity>
-                  ))}
+                  {Array.from({ length: totalBooks }, (_, i) => i + 1).map(bookNum => {
+                    const statusData = bookUploadStatus[bookNum] || { status: 'pending', progress: 0 };
+                    const { status, progress, error } = statusData;
+                    
+                    const isPending = status === 'pending';
+                    const isUploading = status === 'uploading';
+                    const isCompleted = status === 'completed';
+                    const isFailed = status === 'failed';
+                    
+                    return (
+                      <View key={bookNum} style={styles.bookButtonContainer}>
+                        <TouchableOpacity
+                          style={[
+                            styles.bookButton,
+                            currentBookNumber === bookNum && styles.bookButtonActive,
+                            !isCompleted && styles.bookButtonDisabled,
+                          ]}
+                          disabled={!isCompleted}
+                          onPress={() => {
+                            console.log(`🔍 Switching to book ${bookNum}`);
+                            setCurrentBookNumber(bookNum);
+                          }}
+                        >
+                          <Text
+                            style={[
+                              styles.bookButtonText,
+                              currentBookNumber === bookNum && styles.bookButtonTextActive,
+                              !isCompleted && styles.bookButtonTextDisabled,
+                            ]}
+                          >
+                            Book {bookNum}
+                          </Text>
+                        </TouchableOpacity>
+                        
+                        {/* Upload Status Indicator */}
+                        {isPending && (
+                          <Text style={styles.uploadStatus}>⏳ Pending...</Text>
+                        )}
+                        {isUploading && (
+                          <Text style={styles.uploadStatus}>📤 Uploading {progress}%</Text>
+                        )}
+                        {isCompleted && (
+                          <Text style={styles.uploadStatusSuccess}>✅ Ready</Text>
+                        )}
+                        {isFailed && (
+                          <View style={styles.failedContainer}>
+                            <Text style={styles.uploadStatusFailed}>❌ Failed</Text>
+                            <TouchableOpacity
+                              style={styles.retryButton}
+                              onPress={() => handleRetryUpload(bookNum)}
+                            >
+                              <Text style={styles.retryButtonText}>Retry</Text>
+                            </TouchableOpacity>
+                          </View>
+                        )}
+                      </View>
+                    );
+                  })}
                 </View>
+                
+                {/* Warning if not all books uploaded */}
+                {!allBooksUploaded && (
+                  <View style={styles.uploadWarning}>
+                    <Text style={styles.uploadWarningText}>
+                      ⚠️ Please wait for all books to upload before generating PDF
+                    </Text>
+                  </View>
+                )}
               </View>
             )}
             
@@ -508,13 +654,38 @@ const PhotoBookPreview: React.FC<PhotoBookPreviewProps> = ({
                   ]}
                 >
                   {messages.length > 0 ? (
-                    <BookPreviewPages
-                      messages={currentBookMessages}
-                      pageCount={pageCount || photoBook?.pageCount || 30}
-                      resolvedConfig={resolvedConfig}
-                      containerWidth={Math.max(containerWidth, 300)}
-                      format={format || photoBook?.format || 'standard_14_8x21'}
-                    />
+                    <>
+                      {(() => {
+                        // For multi-book: use book's estimatedPages, for single book: use pageCount
+                        let finalPageCount = pageCount || photoBook?.pageCount || 30;
+                        
+                        if (photoBook?.books && photoBook.books.length > 0) {
+                          const currentBook = photoBook.books.find((b: any) => b.bookNumber === currentBookNumber);
+                          if (currentBook && currentBook.estimatedPages) {
+                            finalPageCount = currentBook.estimatedPages;
+                          }
+                        }
+                        
+                        console.log(`📄 PASSING TO BookPreviewPages: ${currentBookMessages.length} messages, pageCount: ${finalPageCount}`);
+                        return null;
+                      })()}
+                      <BookPreviewPages
+                        messages={currentBookMessages}
+                        pageCount={(() => {
+                          // For multi-book: use book's estimatedPages, for single book: use pageCount
+                          if (photoBook?.books && photoBook.books.length > 0) {
+                            const currentBook = photoBook.books.find((b: any) => b.bookNumber === currentBookNumber);
+                            if (currentBook && currentBook.estimatedPages) {
+                              return currentBook.estimatedPages;
+                            }
+                          }
+                          return pageCount || photoBook?.pageCount || 30;
+                        })()}
+                        resolvedConfig={resolvedConfig}
+                        containerWidth={Math.max(containerWidth, 300)}
+                        format={format || photoBook?.format || 'standard_14_8x21'}
+                      />
+                    </>
                   ) : (
                     <View style={styles.emptyPreview}>
                       <ActivityIndicator size="small" color={COLORS.lightBlue} />
@@ -560,11 +731,13 @@ const PhotoBookPreview: React.FC<PhotoBookPreviewProps> = ({
                 ? 'Saving theme…'
                 : generatingPdf
                 ? 'Generating PDF…'
+                : !allBooksUploaded
+                ? 'Waiting for uploads…'
                 : 'Generate PDF'
             }
             onPress={handleGeneratePdf}
             animating={savingTheme === photoBookId || generatingPdf}
-            disable={savingTheme === photoBookId || generatingPdf}
+            disable={savingTheme === photoBookId || generatingPdf || !allBooksUploaded}
           />
         )}
         {photoBook?.books && photoBook.books.length > 0 ? (
@@ -774,6 +947,9 @@ const styles = StyleSheet.create({
     flexWrap: 'wrap',
     gap: wp(2),
   },
+  bookButtonContainer: {
+    alignItems: 'center',
+  },
   bookButton: {
     paddingVertical: hp(1),
     paddingHorizontal: wp(3),
@@ -786,6 +962,10 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.lightBlue,
     borderColor: COLORS.lightBlue,
   },
+  bookButtonDisabled: {
+    opacity: 0.5,
+    backgroundColor: COLORS.lightGray,
+  },
   bookButtonText: {
     fontSize: rfs(12),
     fontFamily: fonts.POPPINS.Regular,
@@ -794,6 +974,57 @@ const styles = StyleSheet.create({
   bookButtonTextActive: {
     color: COLORS.white2,
     fontFamily: fonts.POPPINS.SemiBold,
+  },
+  bookButtonTextDisabled: {
+    color: COLORS.gray,
+  },
+  uploadStatus: {
+    fontSize: rfs(10),
+    fontFamily: fonts.POPPINS.Regular,
+    color: COLORS.gray,
+    marginTop: hp(0.5),
+  },
+  uploadStatusSuccess: {
+    fontSize: rfs(10),
+    fontFamily: fonts.POPPINS.Regular,
+    color: COLORS.green,
+    marginTop: hp(0.5),
+  },
+  uploadStatusFailed: {
+    fontSize: rfs(10),
+    fontFamily: fonts.POPPINS.Regular,
+    color: COLORS.red,
+    marginTop: hp(0.5),
+  },
+  failedContainer: {
+    alignItems: 'center',
+    marginTop: hp(0.5),
+  },
+  retryButton: {
+    marginTop: hp(0.5),
+    paddingVertical: hp(0.5),
+    paddingHorizontal: wp(2),
+    backgroundColor: COLORS.lightBlue,
+    borderRadius: wp(1),
+  },
+  retryButtonText: {
+    fontSize: rfs(10),
+    fontFamily: fonts.POPPINS.SemiBold,
+    color: COLORS.white2,
+  },
+  uploadWarning: {
+    marginTop: hp(2),
+    padding: wp(2),
+    backgroundColor: '#FFF3CD',
+    borderRadius: wp(1.5),
+    borderWidth: 1,
+    borderColor: '#FFC107',
+  },
+  uploadWarningText: {
+    fontSize: rfs(12),
+    fontFamily: fonts.POPPINS.Regular,
+    color: '#856404',
+    textAlign: 'center',
   },
   pdfButtonsContainer: {
     marginBottom: hp(2),

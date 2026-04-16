@@ -37,8 +37,8 @@ export function estimateMessageHeight(msg: IMessage): number {
   if (isImage && hasImageUri) {
     // Image: 200px image height + gap
     return 200 + MESSAGE_GAP;
-  } else if (isVideoOrAudio && (msg as any).qrUrl) {
-    // Video/Audio with QR: flexDirection row with gap + height
+  } else if (isVideoOrAudio) {
+    // Video/Audio: always reserve space for QR container (shown with placeholder if qrUrl not yet available)
     return (120 + 16 + 20 + 4) + MESSAGE_GAP;
   } else {
     // Text message: estimate based on actual rendering

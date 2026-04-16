@@ -309,31 +309,11 @@ const Chat: React.FC<ChatProps> = ({ navigation }) => {
         chatText: rawChatContent,
       });
 
-      // NEW: Detect large chats and show warning
-      // Use standard format for estimation (most common)
-      const estimatedPages = estimatePages(finalMessages, 'standard_14_8x21');
-      
-      if (estimatedPages > 200) {
-        const splitBooks = splitIntoBooks(finalMessages, 200);
-        
-        Alert.alert(
-          '📚 Large Chat Detected',
-          `Chat loaded successfully!\nFound ${filesMetaData.mediaFiles.length} media files\n\n` +
-          `Your chat has ${finalMessages.length} messages (~${estimatedPages} pages).\n\n` +
-          `We'll split it into ${splitBooks.length} books for better quality:\n\n` +
-          splitBooks.map(b => 
-            `• Book ${b.bookNumber}: ${formatDateRange(b.dateRange.from)} - ${formatDateRange(b.dateRange.to)} (~${b.estimatedPages} pages)`
-          ).join('\n') +
-          `\n\nYou can preview and order all books together.`,
-          [{ text: 'OK, Continue' }]
-        );
-      } else {
-        // Single book - show success message
-        Alert.alert(
-          'Success',
-          `Chat loaded successfully!\nFound ${filesMetaData.mediaFiles.length} media files`,
-        );
-      }
+      // Show simple success message
+      Alert.alert(
+        'Success',
+        `Chat loaded successfully!\nFound ${filesMetaData.mediaFiles.length} media files`,
+      );
     } catch (error: any) {
       console.error('Error loading WhatsApp export:', error);
       Alert.alert(
@@ -912,493 +892,84 @@ const Chat: React.FC<ChatProps> = ({ navigation }) => {
       
       const format = (route?.params as any)?.format || 'standard_14_8x21';
       
-      // Calculate if multi-book (> 200 pages)
+      // 🔥 NEW FLOW: Skip estimation, go directly to Preview for accurate calculation
+      console.log(`📚 NEW FLOW: Navigating to Preview for accurate page calculation`);
+      console.log(`📚 Total messages: ${checkedMessages.length}, format: ${format}`);
+      
+      // Save chat and messages to Redux for Preview to access
+      const finalChat: IChat = {
+        _id: chatToUse._id,
+        author: chatToUse.author,
+        mediaFiles: chatToUse.mediaFiles || [],
+        createdAt: chatToUse.createdAt,
+        updatedAt: chatToUse.updatedAt,
+        platform: 'whatsapp',
+        totalMessages: checkedMessages.length,
+        status: 'active',
+        importedAt: new Date().toISOString(),
+        bookConfig: bookConfig || {
+          fontFamily: fonts.ROBOTO.Medium,
+          fontSize: 10,
+          fontStyle: 'regular',
+          chatBackground: '#E5DDD5',
+          hideName: false,
+          senderBackground: '#D9FDD3',
+          senderTextColor: '#111B21',
+          receiverBackground: '#FFFFFF',
+          receiverTextColor: '#111B21',
+          dateFormat: 'DD/MM/YYYY hh:mm A',
+        },
+      };
+      
+      dispatch(saveCurrentChat(finalChat));
+      dispatch(saveCurrentChatMessages(checkedMessages));
+      
+      // Only pass media files that are referenced by checked messages
+      const checkedLocalPaths = new Set(
+        checkedMessages
+          .filter(m => m.localPath)
+          .map(m => m.localPath!.split('/').pop())
+      );
+      const filteredMediaFiles = (whatsappChatData?.mediaFiles || []).filter(
+        (f: any) => checkedLocalPaths.has(f.name)
+      );
+      
+      // Navigate to Preview with calculation mode enabled
+      navigation.navigate('PhotoBookPreview', {
+        chatId: chatToUse._id,
+        format,
+        needsCalculation: true,
+        mediaFiles: filteredMediaFiles,
+        bookspecs: (route?.params as any)?.bookspecs,
+      });
+      
+      setIsSubmitting(false);
+      
+      // OLD FLOW REMOVED - No more estimation-based splitting
+      // The Preview page will now handle:
+      // 1. Accurate page calculation using layout
+      // 2. Splitting at exactly 200 pages if needed
+      // 3. Uploading books with correct splits
+      
+      /* OLD CODE COMMENTED OUT - Kept for reference
+      
       const estimatedPages = estimatePages(checkedMessages, format);
-      console.log(`📚 estimatedPages: ${estimatedPages}, format: ${format}`);
       
       if (estimatedPages > 200) {
-        // ========================================
-        // MULTI-BOOK FLOW (> 200 pages)
-        // ========================================
-        console.log(`📚 ========== MULTI-BOOK FLOW START ==========`);
-        console.log(`📚 Total estimated pages: ${estimatedPages}`);
-        console.log(`📚 Total media files: ${whatsappChatData?.mediaFiles?.length || 0}`);
-        console.log(`📚 Format: ${format}`);
-        
-        const bookChunks = splitIntoBooksWithMedia(
-          checkedMessages,
-          whatsappChatData?.mediaFiles || [],
-          200,
-          format
-        );
-        
-        console.log(`📚 Created ${bookChunks.length} book chunks:`);
-        bookChunks.forEach((book, index) => {
-          console.log(`📚 Book ${book.bookNumber}: ${book.messages.length} messages, ~${book.estimatedPages} pages`);
-        });
-        
-        // Book chunks created
-        
-        // Upload Book 1 first (BLOCKING - user waits)
-        const book1Result = await uploadSingleBook(
-          chatToUse._id, 
-          bookChunks[0],
-          (progress) => {
-            setUploadProgress(progress);
-            if (progress === 100) {
-              setIsProcessing(true);
-            }
-          }
-        );
-        
-        if (!book1Result.success) {
-          Alert.alert('Error', `Book 1 upload failed: ${book1Result.error}`);
-          setIsSubmitting(false);
-          return;
-        }
-        
-        // Merge qrUrl and thumbnailUrl into Book 1 messages
-        const book1FinalMessages = bookChunks[0].messages.map(m => {
-          if ((m.messageType === 'video' || m.messageType === 'audio') && m.localPath) {
-            const filename = m.localPath.split('/').pop();
-            const updates: any = {};
-            if (filename && book1Result.qrMap && book1Result.qrMap[filename]) {
-              updates.qrUrl = book1Result.qrMap[filename];
-            }
-            if (m.messageType === 'video' && filename && book1Result.thumbnailMap && book1Result.thumbnailMap[filename]) {
-              updates.thumbnailUrl = book1Result.thumbnailMap[filename];
-            }
-            if (Object.keys(updates).length > 0) {
-              return { ...m, ...updates };
-            }
-          }
-          return m;
-        });
-        
-        console.log(`📚 Book 1 final messages prepared: ${book1FinalMessages.length} messages`);
-        console.log(`📚 chatToUse structure prepared`);
-        console.log(`📚 bookConfig ready`);
-        
-        // Prepare books metadata for navigation
-        const booksMetadata = bookChunks.map((b, index) => {
-          return {
-            bookNumber: b.bookNumber || (index + 1),
-            messageCount: b.messages?.length || 0,
-            estimatedPages: b.estimatedPages || 0,
-            dateRange: b.dateRange || { from: '', to: '' },
-          };
-        });
-        
-        console.log(`📚 Books metadata prepared:`, booksMetadata);
-        
-        // Save Book 1 to Redux - create a clean chat object
-        const finalChat: IChat = {
-          _id: chatToUse._id,
-          author: chatToUse.author,
-          mediaFiles: chatToUse.mediaFiles || [],
-          createdAt: chatToUse.createdAt,
-          updatedAt: chatToUse.updatedAt,
-          platform: 'whatsapp',
-          totalMessages: book1FinalMessages.length,
-          status: 'active',
-          importedAt: new Date().toISOString(),
-          bookConfig: bookConfig || {
-            fontFamily: fonts.ROBOTO.Medium,
-            fontSize: 10,
-            fontStyle: 'regular',
-            chatBackground: '#E5DDD5',
-            hideName: false,
-            senderBackground: '#D9FDD3',
-            senderTextColor: '#111B21',
-            receiverBackground: '#FFFFFF',
-            receiverTextColor: '#111B21',
-            dateFormat: 'DD/MM/YYYY hh:mm A',
-          },
-        };
-        
-        console.log(`📚 Final chat prepared with bookConfig`);
-        
-        try {
-          dispatch(saveCurrentChat(finalChat));
-          console.log(`📚 saveCurrentChat dispatched successfully`);
-        } catch (err) {
-          console.error(`📚 Error in saveCurrentChat:`, err);
-          throw err;
-        }
-        
-        try {
-          dispatch(saveCurrentChatMessages(book1FinalMessages));
-          console.log(`📚 saveCurrentChatMessages dispatched successfully`);
-        } catch (err) {
-          console.error(`📚 Error in saveCurrentChatMessages:`, err);
-          throw err;
-        }
-        
-        const chatIdStr = chatToUse?._id || '';
-        console.log(`📚 Redux saved. Dispatching status updates...`);
-        console.log(`📚 chatIdStr: ${chatIdStr}`);
-        console.log(`📚 bookChunks length: ${bookChunks.length}`);
-        
-        if (!chatIdStr) {
-          Alert.alert('Error', 'Chat ID is missing. Please try again.');
-          setIsSubmitting(false);
-          return;
-        }
-        
-        // Validate bookChunks structure
-        if (!bookChunks || bookChunks.length === 0) {
-          Alert.alert('Error', 'Book chunks are missing. Please try again.');
-          setIsSubmitting(false);
-          return;
-        }
-        
-        // Clear any existing book data for this chat (fresh start)
-        try {
-          dispatch(clearBookData({ chatId: chatIdStr }));
-        } catch (err) {
-          console.error('Error clearing book data:', err);
-        }
-        
-        // Small delay to ensure Redux state is ready
-        await new Promise(resolve => setTimeout(resolve, 100));
-        
-        // Initialize Book 1 status as completed
-        try {
-          if (!chatIdStr) {
-            throw new Error('Chat ID is missing');
-          }
-          
-          if (!book1FinalMessages || book1FinalMessages.length === 0) {
-            throw new Error('Book 1 messages are missing');
-          }
-          
-          console.log('🔧 DEBUG: About to dispatch updateBookUploadStatus for Book 1');
-          console.log('🔧 DEBUG: chatIdStr:', chatIdStr);
-          console.log('🔧 DEBUG: book1FinalMessages length:', book1FinalMessages.length);
-          
-          dispatch(updateBookUploadStatus({
-            chatId: chatIdStr,
-            bookNumber: 1,
-            status: 'completed',
-            progress: 100,
-          }));
-          
-          console.log('🔧 DEBUG: Successfully dispatched updateBookUploadStatus for Book 1');
-
-        } catch (err) {
-          console.error(`📚 Error dispatching Book 1 status:`, err);
-        }
-        
-        // Store Book 1 messages
-        try {
-          if (!chatIdStr || !book1FinalMessages || book1FinalMessages.length === 0) {
-            throw new Error('Invalid data for Book 1 messages');
-          }
-          
-          console.log('🔧 DEBUG: About to dispatch appendBookMessages for Book 1');
-          
-          dispatch(appendBookMessages({
-            chatId: chatIdStr,
-            bookNumber: 1,
-            messages: book1FinalMessages,
-          }));
-          
-          console.log('🔧 DEBUG: Successfully dispatched appendBookMessages for Book 1');
-
-        } catch (err) {
-          console.error(`📚 Error appending Book 1 messages:`, err);
-        }
-        
-        // Initialize remaining books as pending
-        for (let i = 1; i < bookChunks.length; i++) {
-          const book = bookChunks[i];
-          
-          if (!book || !book.bookNumber) {
-            console.error(`📚 Invalid book at index ${i}:`, book);
-            continue;
-          }
-          
-          try {
-            if (!chatIdStr) {
-              throw new Error('Chat ID is missing');
-            }
-            
-            if (typeof book.bookNumber !== 'number' || book.bookNumber < 1) {
-              throw new Error(`Invalid book number: ${book.bookNumber}`);
-            }
-            
-            console.log(`🔧 DEBUG: About to dispatch updateBookUploadStatus for Book ${book.bookNumber}`);
-            
-            dispatch(updateBookUploadStatus({
-              chatId: chatIdStr,
-              bookNumber: book.bookNumber,
-              status: 'pending',
-              progress: 0,
-            }));
-            
-            console.log(`🔧 DEBUG: Successfully dispatched updateBookUploadStatus for Book ${book.bookNumber}`);
-          } catch (err) {
-            console.error(`📚 Error dispatching status for book ${book.bookNumber}:`, err);
-          }
-        }
-        console.log(`📚 All books initialized`);
-        
-        // Navigate to PageSelection immediately after Book 1
-        console.log(`📚 Navigating to PageSelection...`);
-        navigation.navigate('PageSelection', {
-          chatId: chatIdStr,
-          format: format,
-          bookspecs: (route?.params as any)?.bookspecs,
-          books: booksMetadata,
-        });
-        
-        setIsSubmitting(false);
-        setUploadProgress(0);
-        setIsProcessing(false);
-        
-        // Upload remaining books in background (NON-BLOCKING)
-        if (bookChunks.length > 1) {
-          uploadRemainingBooksInBackground(
-            chatIdStr, 
-            bookChunks.slice(1),
-            bookChunks.length
-          );
-        }
-        
+        ... multi-book flow ...
       } else {
-        // ========================================
-        // SINGLE-BOOK FLOW (≤ 200 pages)
-        // NO CHANGES - Use existing logic
-        // ========================================
-        console.log(`📖 Single book - no split needed (${estimatedPages} pages)`);
-        
-        let updatedChat: IChat | null = null;
-        let qrMap: Record<string, string> = {};
-        let thumbnailMap: Record<string, string> = {};
-
-        // Filter media files to only those referenced by checked messages
-        const filteredMediaFiles = (whatsappChatData?.mediaFiles || []).filter(file => {
-          return checkedMessages.some(m => 
-            (m.messageType === 'image' || m.messageType === 'video' || m.messageType === 'audio') &&
-            m.localPath &&
-            m.localPath.split('/').pop() === file.name
-          );
-        });
-        
-
-
-        if (filteredMediaFiles.length > 0) {          const data = new FormData();
-          filteredMediaFiles.forEach(file => {
-            const fileUri = file.path.startsWith('file://')
-              ? file.path
-              : `file://${file.path}`;
-
-            data.append('files', {
-              uri: fileUri,
-              name: file.name,
-              type: getMimeType(file.name),
-            });
-          });
-
-          const chatResponse = await uploadChatMedia(chatToUse._id, data, (percent) => {
-            setUploadProgress(percent);
-            if (percent === 100) {
-              setIsProcessing(true);
-            }
-          });
-          updatedChat = chatResponse.data.data;
-          qrMap = chatResponse.data.qrMap || {};
-          thumbnailMap = chatResponse.data.thumbnailMap || {};
-
-          if (updatedChat) {
-            setChat(updatedChat);
-            chatToUse = updatedChat;
-            setUploadProgress(0);
-            setIsProcessing(false);
-          }
-        }
-
-        // Upload messages
-        const messagesPayload = checkedMessages.map((m, messageIndex) => {
-          const payload: any = {
-            date: m.date || '',
-            messageType: ((m.messageType === 'unknown' ? 'text' : m.messageType) as MessageType),
-            senderName: m.senderName,
-            sendingTime: m.sendingTime,
-            text: m.text,
-          };
-
-          // Media URL mapping logic (existing)
-          if ((m.messageType === 'image' || m.messageType === 'video' || m.messageType === 'audio') && m.localPath) {
-            const filename = m.localPath.split('/').pop();
-            
-            if (chatToUse.mediaFiles && Array.isArray(chatToUse.mediaFiles)) {
-              let mediaCountBeforeThis = 0;
-              for (let i = 0; i < messageIndex; i++) {
-                const prevMsg = checkedMessages[i];
-                if ((prevMsg.messageType === 'image' || prevMsg.messageType === 'video' || prevMsg.messageType === 'audio') && prevMsg.localPath) {
-                  mediaCountBeforeThis++;
-                }
-              }
-              
-              let uploadedFile = chatToUse.mediaFiles[mediaCountBeforeThis];
-              
-              if (uploadedFile && uploadedFile.name === filename) {
-                payload.url = uploadedFile.url;
-                if ((m.messageType === 'video' || m.messageType === 'audio') && filename && qrMap[filename]) {
-                  payload.qrUrl = qrMap[filename];
-                }
-                if (m.messageType === 'video' && filename && thumbnailMap[filename]) {
-                  payload.thumbnailUrl = thumbnailMap[filename];
-                }
-              } else {
-                uploadedFile = chatToUse.mediaFiles.find((mf: any) => mf.name === filename);
-                if (uploadedFile?.url) {
-                  payload.url = uploadedFile.url;
-                  if ((m.messageType === 'video' || m.messageType === 'audio') && filename && qrMap[filename]) {
-                    payload.qrUrl = qrMap[filename];
-                  }
-                  if (m.messageType === 'video' && filename && thumbnailMap[filename]) {
-                    payload.thumbnailUrl = thumbnailMap[filename];
-                  }
-                }
-              }
-            }
-          }
-
-          return payload;
-        });
-
-        await bulkMessages(chatToUse._id, messagesPayload);
-
-        const finalChat = { ...(updatedChat || chatToUse), bookConfig: bookConfig };
-        const finalMessages = checkedMessages.map(m => {
-          if ((m.messageType === 'video' || m.messageType === 'audio') && m.localPath) {
-            const filename = m.localPath.split('/').pop();
-            const updates: any = {};
-            if (filename && qrMap[filename]) {
-              updates.qrUrl = qrMap[filename];
-            }
-            if (m.messageType === 'video' && filename && thumbnailMap[filename]) {
-              updates.thumbnailUrl = thumbnailMap[filename];
-            }
-            if (Object.keys(updates).length > 0) {
-              return { ...m, ...updates };
-            }
-          }
-          return m;
-        });
-
-        const savedChatId = uuidv4();
-        dispatch(saveCurrentChat(finalChat));
-        dispatch(saveCurrentChatMessages(finalMessages));
-        dispatch(
-          saveChat({
-            id: savedChatId,
-            chat: {
-              ...finalChat,
-              messages: finalMessages,
-              timestamp: new Date().toISOString(),
-            },
-          }),
-        );
-
-        const photoBookFlow = (route?.params as any)?.photoBookFlow;
-
-        if (photoBookFlow && finalChat?._id) {
-          navigation.navigate('PageSelection', {
-            chatId: finalChat._id,
-            format: format,
-            bookspecs: (route?.params as any)?.bookspecs,
-          });
-        } else {
-          navigation.goBack();
-        }
+        ... single-book flow ...
       }
+      */
       
     } catch (error) {
-      console.error('Upload failed:', error);
-      Alert.alert('Error', 'Chat not saved correctly. Please try again.');
+      console.error('Error in onPressDone:', error);
+      Alert.alert('Error', 'Failed to process chat. Please try again.');
     } finally {
       setIsSubmitting(false);
       setUploadProgress(0);
       setIsProcessing(false);
     }
-
-    // const jsonManipulator = chatData?.map(item => {
-    //   if (item?.isCheck) {
-    //     // Determine the limit based on the device (tablet or phone)
-
-    //     const charLimit = isTablet ? 300 : 200;
-
-    //     // If the senderMessage is shorter than the limit, return the item as is
-    //     if (item?.text?.length <= charLimit) {
-    //       return {
-    //         item,
-    //         fontFamily,
-    //         fontSize,
-    //         fontStyle,
-    //         chatBackground,
-    //         hideName,
-    //         senderBackground,
-    //         senderTextColor,
-    //         receiverBackground,
-    //         receiverTextColor,
-    //         dateFormat,
-    //       };
-    //     } else {
-    //       // If the message is longer, split it into multiple parts
-    //       const messageParts = item?.text.match(
-    //         new RegExp(`.{1,${charLimit}}`, 'g'),
-    //       );
-    //       const newItems = messageParts?.map(part => ({
-    //         ...item,
-    //         senderMessage: part,
-    //         fontFamily,
-    //         fontSize,
-    //         fontStyle,
-    //         chatBackground,
-    //         hideName,
-    //         senderBackground,
-    //         senderTextColor,
-    //         receiverBackground,
-    //         receiverTextColor,
-    //         dateFormat,
-
-    //         // Optionally, adjust the sendingTime for each part if needed
-    //         sendingTime: item?.sendingTime,
-    //         // Adjust other properties as necessary
-    //       }));
-
-    //       return newItems; // Return the array of split messages
-    //     }
-    //   }
-    // });
-
-    // // Flatten the array in case some messages were split into multiple parts
-    // const flattenedJsonManipulator = [].concat(...jsonManipulator);
-    // const filter: any[] = flattenedJsonManipulator?.filter(item => {
-    //   return item != undefined;
-    // });
-
-
-
-    // let chatBubbles = await Promise.all(
-    //   filter.map((item: any, index: number) => {
-    //     return {...item, id: index, bookspecs: route?.params?.bookspecs};
-    //   }),
-    // );
-
-
-
-    // // // return;
-
-    // // // route?.params?.setChat({ nonchat: addedId, chat: chatData });
-    // route?.params?.setFontFamily(fontFamily);
-    // route?.params?.setFontStyle(fontStyle);
-    // route?.params?.addChatToPage(chatBubbles, route?.params?.index);
-
-    // navigation.goBack();
   };
 
   const handleToggleCheck = useCallback((messageId: string) => {
@@ -1425,7 +996,8 @@ const Chat: React.FC<ChatProps> = ({ navigation }) => {
   useEffect(() => {
     if (search.trim()) {
       const matches = messagesToDisplay
-        .filter(msg => 
+        .filter(msg =>
+          msg.messageType === 'text' &&
           msg.text?.toLowerCase().includes(search.toLowerCase())
         )
         .map(msg => msg._id);

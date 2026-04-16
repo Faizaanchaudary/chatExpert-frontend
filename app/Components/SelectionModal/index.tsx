@@ -12,6 +12,7 @@ import { styles } from "./style";
 import { icn } from "../../assets/icons";
 import DatePicker from "react-native-date-picker";
 import DateRangePicker from "../RangeDatePicker";
+
 interface SelectionModalProps {
   setShowSelectionModal?: any;
   showSelectionModal?: any;
@@ -21,6 +22,7 @@ interface SelectionModalProps {
   returnFromDate: (val: any) => void;
   returnToDate: (val: any) => void;
 }
+
 const SelectionModal: React.FC<SelectionModalProps> = ({
   setShowSelectionModal,
   showSelectionModal,
@@ -35,12 +37,10 @@ const SelectionModal: React.FC<SelectionModalProps> = ({
     {
       icon: true,
       title: "Select All",
-      // check: true,
     },
     {
       icon: true,
       title: "Deselect All",
-      // check: false,
     },
     {
       icon: true,
@@ -53,6 +53,7 @@ const SelectionModal: React.FC<SelectionModalProps> = ({
       image: icn.searchIcn,
     },
   ]);
+
   const itemPress = (item, index) => {
     console.log("🚀 ~ itemPress ~ item:", item);
 
@@ -61,7 +62,6 @@ const SelectionModal: React.FC<SelectionModalProps> = ({
     }
     if (item.icon) {
       if (item.title == "Select By Date") {
-        // setShowSelectionModal(false);
         setDateModal(true);
       }
       if (item.title == "Select By Search") {
@@ -87,26 +87,13 @@ const SelectionModal: React.FC<SelectionModalProps> = ({
     setSelectionData(updatedArr);
     setShowSelectionModal(false);
   };
+
   return (
     <Modal transparent={true} visible={showSelectionModal} animationType="fade">
       <TouchableWithoutFeedback onPress={() => setShowSelectionModal(false)}>
         <View style={styles.mainContainer}>
           <TouchableWithoutFeedback>
             <View style={styles.innerContainer}>
-              {/* <DatePicker
-                modal
-                open={dateModal}
-                date={new Date()}
-                mode="date"
-                onConfirm={(date) => {
-                  setDateModal(false);
-                  returnDate(date);
-                  setShowSelectionModal(false);
-                }}
-                onCancel={() => {
-                  setDateModal(false);
-                }}
-              /> */}
               {dateModal ? (
                 <DateRangePicker
                   onFromDateChange={() => {}}
@@ -130,9 +117,7 @@ const SelectionModal: React.FC<SelectionModalProps> = ({
                     return (
                       <View key={index} style={styles.checkBoxContainer}>
                         <Text style={styles.titleTextStyle}>{item.title}</Text>
-                        <TouchableOpacity
-                          onPress={() => itemPress(item, index)}
-                        >
+                        <TouchableOpacity onPress={() => itemPress(item, index)}>
                           <Image
                             style={styles.checkBoxStyle}
                             source={

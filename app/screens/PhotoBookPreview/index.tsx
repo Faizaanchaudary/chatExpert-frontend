@@ -23,7 +23,7 @@ import {
   PhotoBook,
 } from '../../services/photoBookApi';
 import { createGelatoOrder } from '../../services/photoBookApi';
-import { getMessagesByChat } from '../../services/chatApi';
+import { getMessagesByChat, getAllMessagesByChat } from '../../services/chatApi';
 import { useAppDispatch, useAppSelector } from '../../store/Store';
 import {
   setThemeConfigForProject,
@@ -59,6 +59,8 @@ const PhotoBookPreview: React.FC<PhotoBookPreviewProps> = ({
   const [booksToUpload, setBooksToUpload] = useState<any[] | null>(null);
   const [uploadingBooks, setUploadingBooks] = useState(false);
   const [enrichedBooks, setEnrichedBooks] = useState<any[] | null>(null); // books with qrUrl/thumbnailUrl after upload
+  const [isDraftRecalculating, setIsDraftRecalculating] = useState(false); // recalculating pages from draft
+  const [draftBooks, setDraftBooks] = useState<any[] | null>(null); // recalculated books from draft
   
   const [photoBook, setPhotoBook] = useState<PhotoBook | null>(null);
   const [messages, setMessages] = useState<IMessage[]>([]);
@@ -156,7 +158,30 @@ const PhotoBookPreview: React.FC<PhotoBookPreviewProps> = ({
     }
   }, [needsCalculation, routeMediaFiles, booksToUpload]);
 
-  // 🔥 NEW: Upload books handler (for calculation mode)
+  // NEW: Callback when pages are recalculated from draft
+  const handleDraftPagesCalculated = useCallback((pages: IMessage[][]) => {
+    if (pages.length === 0) return;
+
+    console.log(`🔄 [draftRecalc] Total pages calculated: ${pages.length}`);
+
+    const { splitBooksWithMediaByActualPages } = require('../../utils/accurateBookSplitting');
+
+    if (pages.length > 200) {
+      const books = splitBooksWithMediaByActualPages(pages, [], 200);
+      console.log(`📚 [draftRecalc] Split into ${books.length} books:`);
+      books.forEach((b: any) => {
+        console.log(`  Book ${b.bookNumber}: ${b.actualPages} pages, ${b.messages.length} messages | first msg: "${b.messages[0]?.senderName}" last msg: "${b.messages[b.messages.length-1]?.senderName}"`);
+      });
+      setDraftBooks(books);
+      setTotalBooks(books.length);
+    } else {
+      const allMessages = pages.flat();
+      console.log(`📖 [draftRecalc] Single book: ${pages.length} pages, ${allMessages.length} messages`);
+      setDraftBooks([{ bookNumber: 1, messages: allMessages, actualPages: pages.length }]);
+      setTotalBooks(1);
+    }
+    setIsDraftRecalculating(false);
+  }, []);
   const handleUploadAndGeneratePdf = async () => {
     if (!booksToUpload || booksToUpload.length === 0) {
       Alert.alert('Error', 'No books to upload');
@@ -177,12 +202,19 @@ const PhotoBookPreview: React.FC<PhotoBookPreviewProps> = ({
       
       const { createPhotoBook } = require('../../services/photoBookApi');
       
-      const booksMetadata = booksToUpload.map((b: any) => ({
-        bookNumber: b.bookNumber,
-        messageCount: b.messages.length,
-        estimatedPages: b.actualPages,
-        dateRange: b.dateRange,
-      }));
+      // Calculate startMessageIndex for each book
+      let cumulativeIndex = 0;
+      const booksMetadata = booksToUpload.map((b: any) => {
+        const metadata = {
+          bookNumber: b.bookNumber,
+          messageCount: b.messages.length,
+          startMessageIndex: cumulativeIndex,
+          estimatedPages: b.actualPages,
+          dateRange: b.dateRange,
+        };
+        cumulativeIndex += b.messages.length;
+        return metadata;
+      });
       
       console.log(`📚 Books metadata:`, JSON.stringify(booksMetadata, null, 2));
       
@@ -234,12 +266,15 @@ const PhotoBookPreview: React.FC<PhotoBookPreviewProps> = ({
       
       // Upload messages for each book
       const enrichedBooksData: any[] = [];
+      let globalMessageIndex = 0; // Track global message index across all books
+      
       for (let i = 0; i < booksToUpload.length; i++) {
         const book = booksToUpload[i];
         const bookNumber = book.bookNumber;
+        const bookStartIndex = globalMessageIndex; // Save start index for this book
         
         try {
-          console.log(`📤 Uploading Book ${bookNumber}: ${book.messages.length} messages`);
+          console.log(`📤 Uploading Book ${bookNumber}: ${book.messages.length} messages (starting at index ${bookStartIndex})`);
           
           // Update status to uploading
           dispatch(updateBookUploadStatus({
@@ -258,6 +293,7 @@ const PhotoBookPreview: React.FC<PhotoBookPreviewProps> = ({
               senderName: m.senderName,
               sendingTime: m.sendingTime,
               text: m.text,
+              orderIndex: bookStartIndex + messageIndex, // CRITICAL: Preserve exact message order
             };
             
             // Build enriched message (for preview update)
@@ -294,6 +330,9 @@ const PhotoBookPreview: React.FC<PhotoBookPreviewProps> = ({
           
           // Store enriched messages for preview
           enrichedBooksData.push({ ...book, messages: enrichedMessages });
+          
+          // Update global index for next book
+          globalMessageIndex += book.messages.length;
           
           // Update status to completed
           dispatch(updateBookUploadStatus({
@@ -355,10 +394,19 @@ const PhotoBookPreview: React.FC<PhotoBookPreviewProps> = ({
 
   // NEW: Load books metadata from photoBook OR booksToUpload
   useEffect(() => {
+    console.log('📚 [useEffect] Setting totalBooks');
+    console.log('📚 [useEffect] booksToUpload:', booksToUpload?.length);
+    console.log('📚 [useEffect] photoBook?.books:', photoBook?.books?.length);
+    
     if (booksToUpload && booksToUpload.length > 0) {
+      console.log('📚 [useEffect] Setting totalBooks from booksToUpload:', booksToUpload.length);
       setTotalBooks(booksToUpload.length);
     } else if (photoBook?.books && photoBook.books.length > 0) {
+      console.log('📚 [useEffect] Setting totalBooks from photoBook.books:', photoBook.books.length);
       setTotalBooks(photoBook.books.length);
+    } else {
+      console.log('📚 [useEffect] Single book mode');
+      setTotalBooks(1);
     }
   }, [photoBook, booksToUpload]);
 
@@ -384,60 +432,36 @@ const PhotoBookPreview: React.FC<PhotoBookPreviewProps> = ({
 
   // NEW: Filter messages for current book
   const currentBookMessages = React.useMemo(() => {
-    console.log(`🔍 Book ${currentBookNumber}: photoBook.books length:`, photoBook?.books?.length || 0);
-    console.log(`🔍 booksToUpload length:`, booksToUpload?.length || 0);
-    
-    // 🔥 NEW: If we have calculated books (before upload), use those
+    // Before upload: use calculated books
     if (booksToUpload && booksToUpload.length > 0) {
       const book = booksToUpload.find((b: any) => b.bookNumber === currentBookNumber);
-      if (book) {
-        console.log(`🔍 Book ${currentBookNumber}: Using calculated book (${book.messages.length} messages)`);
-        return book.messages;
-      }
+      if (book) return book.messages;
     }
     
-    // After upload: use enriched books (have qrUrl/thumbnailUrl populated)
+    // After upload (in-session): use enriched books with qrUrl/thumbnailUrl
     if (enrichedBooks && enrichedBooks.length > 0) {
       const book = enrichedBooks.find((b: any) => b.bookNumber === currentBookNumber);
-      if (book) {
-        console.log(`🔍 Book ${currentBookNumber}: Using enriched book (${book.messages.length} messages, with QR codes)`);
-        return book.messages;
-      }
+      if (book) return book.messages;
+    }
+
+    // Draft mode: use recalculated books
+    if (draftBooks && draftBooks.length > 0) {
+      const book = draftBooks.find((b: any) => b.bookNumber === currentBookNumber);
+      if (book) return book.messages;
     }
     
-    // After upload: Use photoBook.books
+    // Single book mode
     if (!photoBook?.books || photoBook.books.length === 0) {
-      console.log('🔍 Single book mode - returning all messages');
-      return messages; // Single book - show all messages
+      return messages;
+    }
+
+    // Still recalculating - return all messages so BookPreviewPages can measure
+    if (isDraftRecalculating) {
+      return messages;
     }
     
-    // Multi-book: Try to get messages from Redux first
-    const bookMsgs = bookMessages[currentBookNumber];
-    
-    if (bookMsgs && bookMsgs.length > 0) {
-      console.log(`🔍 Book ${currentBookNumber}: Using Redux messages (${bookMsgs.length} messages)`);
-      return bookMsgs;
-    }
-    
-    // Fallback: filter from all messages (if not in Redux yet)
-    const book = photoBook.books.find((b: any) => b.bookNumber === currentBookNumber);
-    
-    if (!book) {
-      console.log(`🔍 Book ${currentBookNumber}: Not found!`);
-      return [];
-    }
-    
-    let startIndex = 0;
-    for (let i = 0; i < currentBookNumber - 1; i++) {
-      startIndex += photoBook.books[i].messageCount;
-    }
-    const endIndex = startIndex + book.messageCount;
-    
-    console.log(`🔍 Book ${currentBookNumber}: Slicing ${startIndex}-${endIndex} (${endIndex - startIndex} messages)`);
-    const slicedMessages = messages.slice(startIndex, endIndex);
-    
-    return slicedMessages;
-  }, [messages, photoBook, currentBookNumber, bookMessages, booksToUpload, enrichedBooks]);
+    return messages;
+  }, [messages, photoBook, currentBookNumber, bookMessages, booksToUpload, enrichedBooks, draftBooks, isDraftRecalculating]);
 
   // Add console logs for page calculation comparison
   React.useEffect(() => {
@@ -460,12 +484,28 @@ const PhotoBookPreview: React.FC<PhotoBookPreviewProps> = ({
   }, [currentBookMessages, currentBookNumber, pageCount, photoBook]);
 
   const loadPhotoBook = useCallback(async () => {
-    if (!photoBookId) return;
+    console.log('📖 [loadPhotoBook] START');
+    console.log('📖 [loadPhotoBook] photoBookId:', photoBookId);
+    
+    if (!photoBookId) {
+      console.log('❌ [loadPhotoBook] No photoBookId, returning');
+      return;
+    }
+    
     try {
+      console.log('📡 [loadPhotoBook] Fetching photobook from API...');
       const response = await getPhotoBookById(photoBookId);
       const data = response.data?.data ?? response.data;
+      console.log('✅ [loadPhotoBook] PhotoBook loaded:', JSON.stringify(data, null, 2));
+      console.log('📖 [loadPhotoBook] PhotoBook chatId:', data?.chatId);
+      console.log('📖 [loadPhotoBook] PhotoBook status:', data?.status);
+      console.log('📖 [loadPhotoBook] PhotoBook books:', data?.books);
+      console.log('📖 [loadPhotoBook] PhotoBook books length:', data?.books?.length);
+      console.log('📖 [loadPhotoBook] FULL RESPONSE:', JSON.stringify(response.data, null, 2));
+      
       setPhotoBook(data);
       if (data?.theme_config) {
+        console.log('🎨 [loadPhotoBook] Loading theme config');
         dispatch(
           loadThemeConfigForProject({
             photoBookId,
@@ -476,28 +516,52 @@ const PhotoBookPreview: React.FC<PhotoBookPreviewProps> = ({
           })
         );
       }
-      if (data?.previewUrl) setPreviewUrl(data.previewUrl);
+      if (data?.previewUrl) {
+        console.log('🖼️ [loadPhotoBook] Setting preview URL:', data.previewUrl);
+        setPreviewUrl(data.previewUrl);
+      }
     } catch (e) {
+      console.error('❌ [loadPhotoBook] Error:', e);
       Alert.alert('Error', 'Failed to load photo book');
     }
   }, [photoBookId, dispatch]);
 
   const loadMessages = useCallback(async () => {
+    console.log('🔍 [loadMessages] START');
+    console.log('🔍 [loadMessages] needsCalculation:', needsCalculation);
+    console.log('🔍 [loadMessages] chatId:', chatId);
+    console.log('🔍 [loadMessages] photoBook?.chatId:', photoBook?.chatId);
+    console.log('🔍 [loadMessages] reduxChatId:', reduxChatId);
+    console.log('🔍 [loadMessages] reduxMessages length:', reduxMessages?.length);
+    
     // 🔥 NEW: In calculation mode, messages are already in Redux from chat screen
     if (needsCalculation) {
       console.log('📥 Calculation mode: Using messages from Redux');
       if (reduxMessages && reduxMessages.length > 0) {
+        console.log('✅ Setting messages from Redux:', reduxMessages.length);
         setMessages(filterSystemMessages(reduxMessages));
+      } else {
+        console.log('❌ No Redux messages available');
       }
       return;
     }
     
     const cid = chatId || (photoBook as PhotoBook)?.chatId;
-    if (!cid) return;
+    console.log('🔍 [loadMessages] Resolved cid:', cid);
+    
+    if (!cid) {
+      console.log('❌ [loadMessages] No chatId available, returning');
+      return;
+    }
+    
     try {
       // Prefer Redux messages to guarantee deterministic order in UI.
       const resolvedCid =
         typeof cid === 'object' ? (cid as any)?._id : cid;
+      
+      console.log('🔍 [loadMessages] resolvedCid:', resolvedCid);
+      console.log('🔍 [loadMessages] Checking Redux: reduxChatId === resolvedCid?', reduxChatId === resolvedCid);
+      
       if (
         reduxChatId &&
         resolvedCid &&
@@ -505,18 +569,18 @@ const PhotoBookPreview: React.FC<PhotoBookPreviewProps> = ({
         Array.isArray(reduxMessages) &&
         reduxMessages.length > 0
       ) {
+        console.log('✅ [loadMessages] Using Redux messages:', reduxMessages.length);
         setMessages(filterSystemMessages(reduxMessages));
         return;
       }
 
-      const response = await getMessagesByChat(
-        typeof cid === 'object' ? (cid as any)?._id : cid,
-        { limit: 2000 }
+      console.log('📡 [loadMessages] Fetching messages from API for chatId:', resolvedCid);
+      const arr = await getAllMessagesByChat(
+        typeof cid === 'object' ? (cid as any)?._id : cid
       );
-      const data = response.data?.data ?? response.data;
-      const arr = Array.isArray(data) ? data : [];
       setMessages(filterSystemMessages(arr));
-    } catch {
+    } catch (error) {
+      console.error('❌ [loadMessages] Error:', error);
       setMessages([]);
     }
   }, [chatId, photoBook, reduxChatId, reduxMessages, needsCalculation]);
@@ -535,10 +599,39 @@ const PhotoBookPreview: React.FC<PhotoBookPreviewProps> = ({
   }, [needsCalculation, reduxMessages]);
 
   useEffect(() => {
+    console.log('🔄 [useEffect] photoBook.chatId changed');
+    console.log('🔄 [useEffect] photoBook?.chatId:', photoBook?.chatId);
+    console.log('🔄 [useEffect] photoBook?.status:', photoBook?.status);
+    console.log('🔄 [useEffect] photoBook?.books:', photoBook?.books);
+    console.log('🔄 [useEffect] reduxChatId:', reduxChatId);
+    console.log('🔄 [useEffect] reduxMessages length:', reduxMessages?.length);
+    
     if (photoBook?.chatId) {
       const cid = typeof photoBook.chatId === 'object' ? (photoBook.chatId as any)?._id : photoBook.chatId;
+      console.log('🔄 [useEffect] Resolved cid:', cid);
+      
       if (cid) {
-        // Prefer Redux messages when available for this chat.
+        // 🔥 IMPORTANT: For draft photobooks, DON'T use Redux messages
+        // Only use backend messages that were actually uploaded
+        if (photoBook.status === 'draft' && !photoBook.generatedPdfUrl) {
+          console.log('⚠️ [useEffect] Draft photobook with no PDF - fetching messages from backend');
+          console.log('📡 [useEffect] Fetching messages from API for cid:', cid);
+          getAllMessagesByChat(cid)
+            .then((arr) => {
+              if (arr.length === 0) {
+                setMessages([]);
+              } else {
+                setMessages(filterSystemMessages(arr));
+              }
+            })
+            .catch((error) => {
+              console.error('❌ [useEffect] Error fetching messages:', error);
+              setMessages([]);
+            });
+          return;
+        }
+        
+        // For non-draft or PDF-generated photobooks, prefer Redux messages
         if (
           reduxChatId &&
           reduxChatId === cid &&
@@ -549,22 +642,40 @@ const PhotoBookPreview: React.FC<PhotoBookPreviewProps> = ({
           return;
         }
 
-        getMessagesByChat(cid, { limit: 2000 })
-          .then((res) => {
-            const d = res.data?.data ?? res.data;
-            const arr = Array.isArray(d) ? d : [];
+        getAllMessagesByChat(cid)
+          .then((arr) => {
             setMessages(filterSystemMessages(arr));
           })
-          .catch(() => setMessages([]));
+          .catch((error) => {
+            console.error('❌ [useEffect] Error fetching messages:', error);
+            setMessages([]);
+          });
+      } else {
+        console.log('❌ [useEffect] Could not resolve cid');
       }
+    } else {
+      console.log('❌ [useEffect] No photoBook.chatId');
     }
-  }, [photoBook?.chatId, reduxChatId, reduxMessages]);
+  }, [photoBook?.chatId, photoBook?.status, photoBook?.generatedPdfUrl, reduxChatId, reduxMessages]);
 
   useEffect(() => {
-    if (loading && photoBook !== undefined) {
+    if (loading && photoBook !== undefined && messages.length > 0) {
       setLoading(false);
     }
-  }, [photoBook, loading]);
+  }, [photoBook, loading, messages]);
+
+  // When opening a multi-book draft and messages are loaded, trigger recalculation
+  useEffect(() => {
+    if (
+      !needsCalculation &&
+      !isDraftRecalculating &&
+      !draftBooks &&
+      photoBook?.books && photoBook.books.length > 0 &&
+      messages.length > 0
+    ) {
+      setIsDraftRecalculating(true);
+    }
+  }, [photoBook, messages, needsCalculation, isDraftRecalculating, draftBooks]);
 
   const handleSelectTheme = (id: string) => {
     dispatch(setThemeConfigForProject({ photoBookId, themeId: id, overrides }));
@@ -857,7 +968,7 @@ const PhotoBookPreview: React.FC<PhotoBookPreviewProps> = ({
   };
 
   const screenWidth = Dimensions.get('window').width;
-  const containerWidth = previewAreaWidth > 0 ? previewAreaWidth : screenWidth - wp(6);
+  const containerWidth = Math.round(previewAreaWidth > 0 ? previewAreaWidth : screenWidth - wp(6));
   const previewHeight = containerWidth * A5_ASPECT;
 
   return (
@@ -951,7 +1062,15 @@ const PhotoBookPreview: React.FC<PhotoBookPreviewProps> = ({
                 </Text>
               </View>
             )}
-            
+
+            {isDraftRecalculating && (
+              <View style={styles.calculationOverlay}>
+                <ActivityIndicator size="large" color={COLORS.lightBlue} />
+                <Text style={styles.calculationText}>Loading preview...</Text>
+                <Text style={styles.calculationSubtext}>Recalculating page layout...</Text>
+              </View>
+            )}
+
             {/* 🔥 Upload progress indicator */}
             {uploadingBooks && (
               <View style={styles.uploadProgressContainer}>
@@ -1027,7 +1146,7 @@ const PhotoBookPreview: React.FC<PhotoBookPreviewProps> = ({
                         return null;
                       })()}
                       <BookPreviewPages
-                        messages={currentBookMessages}
+                        messages={isDraftRecalculating ? messages : currentBookMessages}
                         pageCount={(() => {
                           // 🔥 NEW: Use booksToUpload actualPages if available
                           if (booksToUpload && booksToUpload.length > 0) {
@@ -1049,7 +1168,10 @@ const PhotoBookPreview: React.FC<PhotoBookPreviewProps> = ({
                         resolvedConfig={resolvedConfig}
                         containerWidth={Math.max(containerWidth, 300)}
                         format={format || photoBook?.format || 'standard_14_8x21'}
-                        onPagesCalculated={isCalculating && !booksToUpload ? handlePagesCalculated : undefined}
+                        onPagesCalculated={
+                          isDraftRecalculating ? handleDraftPagesCalculated :
+                          (isCalculating && !booksToUpload ? handlePagesCalculated : undefined)
+                        }
                       />
                     </>
                   ) : (

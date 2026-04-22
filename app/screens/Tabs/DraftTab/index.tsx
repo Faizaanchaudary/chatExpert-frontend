@@ -1,10 +1,12 @@
 import {Alert, FlatList, StyleSheet, Text, View} from 'react-native';
-import React, {useState, useEffect} from 'react';
+import React, {useState, useEffect, useCallback} from 'react';
 import {styles} from './style';
 import DraftCard from '../../../Components/DraftCard';
 import moment from 'moment';
 import {sleep} from 'rn-declarative';
 import {useSelector} from 'react-redux';
+import {getUserPhotoBooks} from '../../../services/photoBookApi';
+import {useFocusEffect} from '@react-navigation/native';
 
 interface DraftTabProps {
   navigation?: any;
@@ -15,14 +17,63 @@ interface DraftItem {
   bookNumber: string;
   pages: string;
   date: string;
+  bookSpecs?: any;
+  photoBookId?: string;
 }
 
 const DraftTab: React.FC<DraftTabProps> = ({navigation}) => {
   const [draftCardData, setDraftCardData] = useState<DraftItem[]>([]);
   const {savedChats} = useSelector((state: any) => state.user);
+  const [backendPhotoBooks, setBackendPhotoBooks] = useState<any[]>([]);
+  const [loading, setLoading] = useState(false);
+  
+  console.log('📝 [DraftTab] Rendered');
+  console.log('📝 [DraftTab] savedChats:', savedChats);
+  console.log('📝 [DraftTab] savedChats count:', savedChats?.length);
+  
+  // Fetch photobooks from backend - refetch when screen comes into focus
+  const fetchPhotoBooks = useCallback(async () => {
+    console.log('📥 [DraftTab] Fetching photobooks from backend...');
+    setLoading(true);
+    try {
+      const response = await getUserPhotoBooks(1, 50);
+      const photoBooks = response.data?.data || [];
+      console.log('📥 [DraftTab] Fetched photobooks:', photoBooks.length);
+      console.log('📥 [DraftTab] PhotoBooks:', photoBooks);
+      
+      // Filter only draft status
+      const drafts = photoBooks.filter((pb: any) => pb.status === 'draft');
+      console.log('📥 [DraftTab] Draft photobooks:', drafts.length);
+      setBackendPhotoBooks(drafts);
+    } catch (error) {
+      console.error('❌ [DraftTab] Error fetching photobooks:', error);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  // Fetch on mount
+  useEffect(() => {
+    fetchPhotoBooks();
+  }, [fetchPhotoBooks]);
+
+  // Refetch when screen comes into focus (after uploading books)
+  useFocusEffect(
+    useCallback(() => {
+      console.log('🔄 [DraftTab] Screen focused, refetching photobooks...');
+      fetchPhotoBooks();
+    }, [fetchPhotoBooks])
+  );
+  
   // console.log("Savedss", savedChats[3]?.chat[0][0]?.bookSpecs);
   useEffect(() => {
+    console.log('📝 [DraftTab] useEffect triggered');
+    
+    const allDrafts: DraftItem[] = [];
+    
+    // Add savedChats (local drafts)
     if (savedChats && savedChats.length > 0) {
+      console.log('📝 [DraftTab] Processing savedChats...');
       // Transform saved chats to match DraftCard format
       const formattedChats = savedChats.map((chat: any) => {
         // Safely extract bookSpecs - handle different chat structures
@@ -56,8 +107,39 @@ const DraftTab: React.FC<DraftTabProps> = ({navigation}) => {
         };
       });
 
-      // Sort by date (newest first)
-      const sortedChats = formattedChats.sort((a: DraftItem, b: DraftItem) => {
+      allDrafts.push(...formattedChats);
+    }
+    
+    // Add backend photobooks (draft status)
+    backendPhotoBooks.forEach((photoBook: any) => {
+      // chatId might be populated (object) or just a string
+      const chatIdString = typeof photoBook.chatId === 'string' 
+        ? photoBook.chatId 
+        : photoBook.chatId?._id || photoBook.chatId;
+      
+      // Check if not already in savedChats
+      const exists = savedChats?.some((chat: any) => chat.id === chatIdString);
+      if (!exists && chatIdString) {
+        const bookCount = photoBook.books?.length || 0;
+        const pagesDisplay = bookCount > 1
+          ? `${bookCount} books`
+          : `${photoBook.pageCount || 0} pages`;
+        allDrafts.push({
+          id: chatIdString,
+          bookNumber: `Draft ${chatIdString.substring(0, 8)}`,
+          pages: pagesDisplay,
+          date: moment(photoBook.createdAt).format('DD-MM-YY'),
+          bookSpecs: {
+            format: photoBook.format,
+            pageCount: photoBook.pageCount,
+          },
+          photoBookId: photoBook._id,
+        });
+      }
+    });
+
+    // Sort by date (newest first)
+    const sortedChats = allDrafts.sort((a: DraftItem, b: DraftItem) => {
         return (
           moment(b.date, 'DD-MM-YY').valueOf() -
           moment(a.date, 'DD-MM-YY').valueOf()
@@ -65,26 +147,32 @@ const DraftTab: React.FC<DraftTabProps> = ({navigation}) => {
       });
 
       setDraftCardData(sortedChats);
-    } else {
-      // Fallback to a sample draft if no saved chats
-      setDraftCardData([]);
-    }
-  }, [savedChats]);
+      console.log('📝 [DraftTab] Draft cards set:', sortedChats.length);
+  }, [savedChats, backendPhotoBooks]);
 
   return (
     <View style={styles.mainContainer}>
       <Text style={styles.textStyle}>Draft</Text>
-      <FlatList
-        data={draftCardData}
-        ListEmptyComponent={() => {
-          return (
-            <View style={styles.emptyContainer}>
-              <Text style={{color: 'black'}}>No drafts found</Text>
-            </View>
-          );
-        }}
-        keyExtractor={item => item?.id?.toString() || `draft-${item?.bookNumber}`}
-        renderItem={({item, index}) => {
+      {loading ? (
+        <View style={styles.emptyContainer}>
+          <Text style={{color: 'black'}}>Loading drafts...</Text>
+        </View>
+      ) : (
+        <FlatList
+          data={draftCardData}
+          ListEmptyComponent={() => {
+            return (
+              <View style={styles.emptyContainer}>
+                <Text style={{color: 'black'}}>No drafts found</Text>
+              </View>
+            );
+          }}
+          keyExtractor={(item, index) => {
+            // Use photoBookId if available (backend draft), otherwise use chatId
+            // Add index as fallback to ensure uniqueness
+            return item?.photoBookId || item?.id || `draft-${index}`;
+          }}
+          renderItem={({item, index}) => {
           const foundChat = savedChats?.find(
             (chat: {id: string; chat: any}) => chat.id === item?.id,
           );
@@ -96,11 +184,26 @@ const DraftTab: React.FC<DraftTabProps> = ({navigation}) => {
             <DraftCard
               length={chatLength}
               item={item}
+              onDeleted={fetchPhotoBooks}
               continuePress={() => {
-                console.log('iteteet', item);
-                navigation.navigate('BookList', {
-                  uniqueId: item?.id,
-                  isExtendedView: true,
+                console.log('📖 [DraftTab] Opening draft:', item);
+                
+                // If this draft has a photoBookId, navigate directly to preview
+                if (item?.photoBookId) {
+                  console.log('📖 [DraftTab] Opening existing photobook:', item.photoBookId);
+                  navigation.navigate('PhotoBookPreview', {
+                    photoBookId: item.photoBookId,
+                    chatId: item?.id,
+                    format: item?.bookSpecs?.format || 'standard_14_8x21',
+                    bookspecs: item?.bookSpecs,
+                  });
+                  return;
+                }
+                
+                // Local draft only (no backend photobook yet)
+                navigation.navigate('PhotoBookPreview', {
+                  chatId: item?.id,
+                  format: item?.bookSpecs?.format || 'standard_14_8x21',
                   bookspecs: item?.bookSpecs,
                 });
               }}
@@ -108,6 +211,7 @@ const DraftTab: React.FC<DraftTabProps> = ({navigation}) => {
           );
         }}
       />
+      )}
     </View>
   );
 };

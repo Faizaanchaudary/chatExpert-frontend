@@ -43,7 +43,32 @@ export function getMessagesByChat(
   chatId: string,
   params?: { page?: number; limit?: number }
 ): Promise<AxiosResponse<{ status: string; data: IMessage[]; meta?: { total: number } }>> {
-  return apiClient.get(`/messages/${chatId}`, { params: params || { limit: 2000 } });
+  return apiClient.get(`/messages/${chatId}`, { params: params || {limit: 2000} });
+}
+
+/**
+ * Fetch ALL messages for a chat by paginating through all pages.
+ * Safe for chats with any number of messages.
+ */
+export async function getAllMessagesByChat(chatId: string): Promise<IMessage[]> {
+  const PAGE_SIZE = 2000;
+  let page = 1;
+  let allMessages: IMessage[] = [];
+
+  while (true) {
+    const response = await apiClient.get(`/messages/${chatId}`, {
+      params: { page, limit: PAGE_SIZE },
+    });
+    const data = response.data?.data ?? response.data;
+    const arr: IMessage[] = Array.isArray(data) ? data : [];
+    allMessages = allMessages.concat(arr);
+
+    const total: number = response.data?.meta?.total ?? 0;
+    if (allMessages.length >= total || arr.length < PAGE_SIZE) break;
+    page++;
+  }
+
+  return allMessages;
 }
 
 export function bulkMessages(

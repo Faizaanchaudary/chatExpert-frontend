@@ -58,6 +58,10 @@ buck-out/
 android/app/src/main/assets/index.android.bundle
 *.hprof
 
+# React Native bundle files (generated files - don't commit)
+android/app/src/main/assets/index.android.bundle
+ios/main.jsbundle
+
 # Ruby / CocoaPods
 /ios/Pods/
 /vendor/bundle/

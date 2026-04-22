@@ -3,7 +3,7 @@
  * Height-based pagination to match selected page dimensions. Text preserves newlines.
  */
 import React, { useMemo, useState, useRef, useCallback, useEffect } from 'react';
-import { View, Text, StyleSheet, Image, InteractionManager } from 'react-native';
+import { View, Text, StyleSheet, Image, InteractionManager, ActivityIndicator } from 'react-native';
 import { IMessage } from '../../interfaces/IMessage';
 import { ResolvedThemeConfig } from '../../themes/types';
 

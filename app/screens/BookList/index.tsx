@@ -1,4 +1,4 @@
-import React, {useEffect, useState, useMemo} from 'react';
+import React, {useEffect, useState, useMemo, useCallback} from 'react';
 import {
   SafeAreaView,
   Dimensions,
@@ -12,6 +12,7 @@ import {
   FlatList,
   StatusBar,
 } from 'react-native';
+import {useFocusEffect} from '@react-navigation/native';
 import LinearGradient from 'react-native-linear-gradient';
 import {IMessage} from '../../interfaces/IMessage';
 import {icn} from '../../assets/icons';
@@ -24,6 +25,7 @@ import {OpenBookPage} from './components/OpenBookPage';
 import {loadSavedChat} from '../../store/Slice/chatSlice';
 import {IChat} from '../../interfaces/IChat';
 import moment from 'moment';
+import {getUserPhotoBooks} from '../../services/photoBookApi';
 
 // Book type enum for clarity
 type BookType = 'standard' | 'square' | 'open';
@@ -69,11 +71,51 @@ const BookList: React.FC<BookListProps> = ({navigation, route}) => {
   const {currentChat, chatMessages} = useAppSelector(state => state.chats);
   const {savedChats} = useAppSelector(state => state.user);
 
+  console.log('📚 [BookList] Rendered');
+  console.log('📚 [BookList] uniqueId:', uniqueId);
+  console.log('📚 [BookList] photoBookFlow:', photoBookFlow);
+  console.log('📚 [BookList] savedChats count:', savedChats?.length);
+  console.log('📚 [BookList] savedChats:', savedChats);
+
   const [isLoadingDraft, setIsLoadingDraft] = useState(false);
   const [selectedChatId, setSelectedChatId] = useState<string | null>(
     uniqueId || null,
   );
   const [currentPageIndex, setCurrentPageIndex] = useState(0);
+  
+  // NEW: State for backend photobooks
+  const [backendPhotoBooks, setBackendPhotoBooks] = useState<any[]>([]);
+  const [loadingPhotoBooks, setLoadingPhotoBooks] = useState(false);
+
+  // NEW: Fetch photobooks from backend - refetch when screen comes into focus
+  const fetchPhotoBooks = useCallback(async () => {
+    console.log('📥 [BookList] Fetching photobooks from backend...');
+    setLoadingPhotoBooks(true);
+    try {
+      const response = await getUserPhotoBooks(1, 50);
+      const photoBooks = response.data?.data || [];
+      console.log('📥 [BookList] Fetched photobooks:', photoBooks.length);
+      console.log('📥 [BookList] PhotoBooks:', photoBooks);
+      setBackendPhotoBooks(photoBooks);
+    } catch (error) {
+      console.error('❌ [BookList] Error fetching photobooks:', error);
+    } finally {
+      setLoadingPhotoBooks(false);
+    }
+  }, []);
+
+  // Fetch on mount
+  useEffect(() => {
+    fetchPhotoBooks();
+  }, [fetchPhotoBooks]);
+
+  // Refetch when screen comes into focus (after uploading books)
+  useFocusEffect(
+    useCallback(() => {
+      console.log('🔄 [BookList] Screen focused, refetching photobooks...');
+      fetchPhotoBooks();
+    }, [fetchPhotoBooks])
+  );
 
   useEffect(() => {
     if (selectedChatId && savedChats?.length > 0) {
@@ -162,7 +204,52 @@ const BookList: React.FC<BookListProps> = ({navigation, route}) => {
   });
 
   // In photo book flow we never show the single-book preview; only list or redirect.
-  const showChatList = !selectedChatId && savedChats?.length > 0;
+  // Combine savedChats (local) and backendPhotoBooks (from API)
+  const allBooks = useMemo(() => {
+    const combined = [...savedChats];
+    
+    // Add backend photobooks that aren't already in savedChats
+    backendPhotoBooks.forEach(photoBook => {
+      // chatId might be populated (object) or just a string
+      const chatIdString = typeof photoBook.chatId === 'string' 
+        ? photoBook.chatId 
+        : photoBook.chatId?._id || photoBook.chatId;
+      
+      const exists = savedChats.some(chat => chat.id === chatIdString);
+      if (!exists && chatIdString) {
+        // Convert photoBook to savedChat format
+        const totalMessages = typeof photoBook.chatId === 'object'
+          ? photoBook.chatId?.totalMessages || 0
+          : 0;
+        const bookCount = photoBook.books?.length || 0;
+        combined.push({
+          id: chatIdString,
+          chat: {
+            _id: chatIdString,
+            messages: [],
+            totalMessages,
+            timestamp: photoBook.createdAt,
+            bookConfig: {
+              format: photoBook.format,
+              pageCount: photoBook.pageCount,
+            },
+          },
+          photoBookId: photoBook._id,
+          status: photoBook.status,
+          bookCount,
+        });
+      }
+    });
+    
+    return combined;
+  }, [savedChats, backendPhotoBooks]);
+
+  const showChatList = !selectedChatId && allBooks.length > 0;
+
+  console.log('📚 [BookList] showChatList:', showChatList);
+  console.log('📚 [BookList] selectedChatId:', selectedChatId);
+  console.log('📚 [BookList] allBooks count:', allBooks.length);
+  console.log('📚 [BookList] pages count:', pages.length);
 
   const handleScroll = (event: any) => {
     const offsetX = event.nativeEvent.contentOffset.x;
@@ -172,8 +259,9 @@ const BookList: React.FC<BookListProps> = ({navigation, route}) => {
 
   const renderChatCard = ({item, index}: {item: {id: string; chat: any}; index: number}) => {
     const messages = item.chat?.messages || [];
-    const messageCount = messages.length;
+    const messageCount = item.chat?.totalMessages || messages.length;
     const timestamp = item.chat?.timestamp;
+    const bookCount = (item as any).bookCount;
 
     const excludedNames = ['system', 'test'];
     const participantNames = [
@@ -198,6 +286,17 @@ const BookList: React.FC<BookListProps> = ({navigation, route}) => {
         style={styles.chatCard}
         activeOpacity={0.7}
         onPress={() => {
+          // Check if this is an existing photobook (from backend)
+          if (item.photoBookId) {
+            console.log('📖 [BookList] Opening existing photobook:', item.photoBookId);
+            navigation.navigate('PhotoBookPreview', {
+              photoBookId: item.photoBookId,
+              chatId: item.id,
+              format: item.chat?.bookConfig?.format || route?.params?.format || 'standard_14_8x21',
+            });
+            return;
+          }
+          
           if (route?.params?.photoBookFlow) {
             // Backend expects MongoDB chat _id; use chat._id from saved chat when available
             const backendChatId = item.chat?._id || item.id;
@@ -220,7 +319,7 @@ const BookList: React.FC<BookListProps> = ({navigation, route}) => {
             {chatTitle}
           </Text>
           <Text style={styles.chatCardSubtitle}>
-            {messageCount} messages
+            {bookCount > 1 ? `${bookCount} books · ${messageCount} messages` : `${messageCount} messages`}
           </Text>
           {timestamp && (
             <Text style={styles.chatCardDate}>
@@ -351,7 +450,7 @@ const BookList: React.FC<BookListProps> = ({navigation, route}) => {
         <View style={styles.headerRight}>
           <Text style={styles.headerCount}>
             {(showChatList || photoBookFlow)
-              ? `${savedChats?.length ?? 0} ${(savedChats?.length ?? 0) === 1 ? 'Book' : 'Books'}`
+              ? `${allBooks.length} ${allBooks.length === 1 ? 'Book' : 'Books'}`
               : bookType === 'open'
                 ? `${currentPageIndex + 1} / ${spreads.length}`
                 : `${currentPageIndex + 1} / ${totalPages}`}
@@ -360,42 +459,45 @@ const BookList: React.FC<BookListProps> = ({navigation, route}) => {
       </View>
 
       {/* Content */}
-      {loading || isLoadingDraft ? (
+      {loading || isLoadingDraft || loadingPhotoBooks ? (
         <View style={styles.loadingContainer}>
           <ActivityIndicator size="large" color={COLORS.accent} />
           <Text style={styles.loadingText}>Loading your book...</Text>
         </View>
       ) : (showChatList || photoBookFlow) ? (
         <FlatList
-          data={savedChats}
-          keyExtractor={item => item.id}
+          data={allBooks}
+          keyExtractor={(item, index) => {
+            // Use photoBookId if available, otherwise chatId, with index fallback
+            return (item as any)?.photoBookId || item.id || `book-${index}`;
+          }}
           renderItem={renderChatCard}
           contentContainerStyle={styles.chatListContainer}
           showsVerticalScrollIndicator={false}
           ListHeaderComponent={
-            <Text style={styles.sectionTitle}>Your Collection</Text>
-          }
-          ListFooterComponent={
-            <TouchableOpacity
-              style={styles.addNewCard}
-              activeOpacity={0.7}
-              onPress={() => {
-                // Pass photo book flow params if coming from CreateYourDesign
-                const photoBookFlow = route?.params?.photoBookFlow;
-                const format = route?.params?.format;
-                const bookspecs = route?.params?.bookspecs;
-                
-                navigation.navigate('Chat', {
-                  photoBookFlow: photoBookFlow,
-                  format: format,
-                  bookspecs: bookspecs,
-                });
-              }}>
-              <View style={styles.addNewIconContainer}>
-                <Text style={styles.addNewIcon}>+</Text>
-              </View>
-              <Text style={styles.addNewText}>Import New Chat</Text>
-            </TouchableOpacity>
+            <>
+              <TouchableOpacity
+                style={styles.addNewCard}
+                activeOpacity={0.7}
+                onPress={() => {
+                  // Pass photo book flow params if coming from CreateYourDesign
+                  const photoBookFlow = route?.params?.photoBookFlow;
+                  const format = route?.params?.format;
+                  const bookspecs = route?.params?.bookspecs;
+                  
+                  navigation.navigate('Chat', {
+                    photoBookFlow: photoBookFlow,
+                    format: format,
+                    bookspecs: bookspecs,
+                  });
+                }}>
+                <View style={styles.addNewIconContainer}>
+                  <Text style={styles.addNewIcon}>+</Text>
+                </View>
+                <Text style={styles.addNewText}>Import New Chat</Text>
+              </TouchableOpacity>
+              <Text style={styles.sectionTitle}>Your Collection</Text>
+            </>
           }
         />
       ) : pages.length === 0 ? (

@@ -45,14 +45,14 @@ const LostYourPassword: React.FC<LostYourPasswordProps> = ({ navigation }) => {
   }, [showModal]);
 
   useEffect(() => {
-    if (resendTime == 30) {
+    if (resendTime == 60) {
       setShowModal(true);
       startTimer();
     }
   }, [resendTime]);
 
   const startTheTimer = () => {
-    setResendTime(30);
+    setResendTime(60);
   };
   const closeModal = () => {
     setShowModal(false);
@@ -93,12 +93,10 @@ const LostYourPassword: React.FC<LostYourPasswordProps> = ({ navigation }) => {
   };
 
   const onContinue = async () => {
-    // Check if any field is empty
     if (!email || !name) {
       Alert.alert("", "Please fill in all fields.");
       return;
     }
-    // Check if email is invalid
 
     if (!validateEmail(email)) {
       Alert.alert("", "Please enter a valid email address.");
@@ -114,14 +112,11 @@ const LostYourPassword: React.FC<LostYourPasswordProps> = ({ navigation }) => {
       } else {
         Alert.alert("Failure", "Something went wrong");
       }
-
-      // navigation.navigate("BottomTabNavigation", { screen: "Home" });
     } catch (err: any) {
-      console.log("err", err?.response);
       if (err?.response?.data?.error) {
         Alert.alert("Failure", err?.response?.data?.error);
       } else {
-        Alert.alert("Failure", "Failed to login, please try again");
+        Alert.alert("Failure", "Failed to send reset code, please try again");
       }
     } finally {
       setLoading(false);

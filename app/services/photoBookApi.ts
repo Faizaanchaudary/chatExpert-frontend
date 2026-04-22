@@ -28,6 +28,7 @@ export interface PhotoBook {
   books?: Array<{
     bookNumber: number;
     messageCount: number;
+    startMessageIndex?: number;
     estimatedPages: number;
     dateRange: { from: string; to: string };
     generatedPdfUrl?: string;
@@ -128,6 +129,10 @@ export function getUserPhotoBooks(
   return apiClient.get('photobooks', {
     params: { page, limit },
   });
+}
+
+export function deletePhotoBook(id: string): Promise<AxiosResponse<{ status: string; data: null }>> {
+  return apiClient.delete(`photobooks/${id}`);
 }
 
 /**

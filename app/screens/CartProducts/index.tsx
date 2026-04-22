@@ -6,8 +6,9 @@ import {
   View,
   Alert,
   TouchableOpacity,
+  ActivityIndicator,
 } from "react-native";
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useState, useCallback } from "react";
 import { styles } from "./style";
 import CustomHeader from "../../Components/CustomHeader";
 import CartCard from "../../Components/CartCard";
@@ -20,6 +21,8 @@ import { useSelector, useDispatch } from "react-redux";
 import { addCart, setCart } from "../../store/Slice/userSlice";
 import AddressCard from "../../Components/AddressCard";
 import moment from "moment";
+import { getUserPhotoBooks } from "../../services/photoBookApi";
+import { useFocusEffect } from "@react-navigation/native";
 
 interface CartProductsProps {
   navigation?: any;
@@ -56,6 +59,23 @@ const CartProducts: React.FC<CartProductsProps> = ({ navigation }) => {
   const [showSuccessBar, setShowSuccessBar] = useState(false);
   const [discount, setDiscount] = useState(0);
   const [showShippingOptions, setShowShippingOptions] = useState(false);
+  const [readyToOrderBooks, setReadyToOrderBooks] = useState<any[]>([]);
+  const [loadingBooks, setLoadingBooks] = useState(false);
+
+  const fetchReadyBooks = useCallback(async () => {
+    setLoadingBooks(true);
+    try {
+      const response = await getUserPhotoBooks(1, 50);
+      const all = response.data?.data || [];
+      setReadyToOrderBooks(all.filter((pb: any) => pb.status === 'pdf_generated'));
+    } catch (e) {
+      // silent
+    } finally {
+      setLoadingBooks(false);
+    }
+  }, []);
+
+  useFocusEffect(useCallback(() => { fetchReadyBooks(); }, [fetchReadyBooks]));
 
   // Get products and current address from redux state
   const cartChats = useSelector((state: any) => state?.user?.cartChats);
@@ -300,6 +320,35 @@ const CartProducts: React.FC<CartProductsProps> = ({ navigation }) => {
 
         {validProducts.length > 0 ? (
           <>
+            {/* Ready to order photobooks */}
+            {readyToOrderBooks.length > 0 && (
+              <View style={readyToOrderStyles.section}>
+                <Text style={readyToOrderStyles.sectionTitle}>📚 Ready to Order</Text>
+                {readyToOrderBooks.map((pb: any) => {
+                  const bookCount = pb.books?.length || 1;
+                  const chatId = typeof pb.chatId === 'object' ? pb.chatId?._id : pb.chatId;
+                  return (
+                    <TouchableOpacity
+                      key={pb._id}
+                      style={readyToOrderStyles.card}
+                      onPress={() => navigation.navigate('PhotoBookPreview', {
+                        photoBookId: pb._id,
+                        chatId,
+                        format: pb.format,
+                      })}>
+                      <View style={readyToOrderStyles.cardInfo}>
+                        <Text style={readyToOrderStyles.cardTitle}>
+                          {bookCount > 1 ? `${bookCount} Books` : '1 Book'} · {pb.format === 'standard_14_8x21' ? 'Standard' : 'Square'}
+                        </Text>
+                        <Text style={readyToOrderStyles.cardSub}>PDF ready · ${pb.totalPrice?.toFixed(2)}</Text>
+                        <Text style={readyToOrderStyles.cardDate}>{moment(pb.createdAt).format('DD MMM YYYY')}</Text>
+                      </View>
+                      <Text style={readyToOrderStyles.cardArrow}>Order →</Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+            )}
             <FlatList
               data={validProducts}
               keyExtractor={(item) => item?.id}
@@ -400,23 +449,46 @@ const CartProducts: React.FC<CartProductsProps> = ({ navigation }) => {
             </View>
           </>
         ) : (
-          <View
-            style={{
-              flex: 1,
-              alignItems: "center",
-              justifyContent: "center",
-              marginTop: hp(10),
-              marginBottom: hp(10),
-            }}
-          >
-            <Text style={styles.subtotalTextStyle}>Your cart is empty</Text>
-            <CustomButton
-              text="Shop Now"
-              oddTextStyle={styles.shippingTextStyle}
-              onPress={() =>
-                navigation.navigate("BottomTab", { screen: "ShopTab" })
-              }
-            />
+          <View style={{ marginTop: hp(4), paddingHorizontal: 16 }}>
+            {loadingBooks ? (
+              <ActivityIndicator size="small" color="#2C3E50" style={{ marginTop: hp(4) }} />
+            ) : readyToOrderBooks.length > 0 ? (
+              <>
+                <Text style={readyToOrderStyles.sectionTitle}>📚 Ready to Order</Text>
+                {readyToOrderBooks.map((pb: any) => {
+                  const bookCount = pb.books?.length || 1;
+                  const chatId = typeof pb.chatId === 'object' ? pb.chatId?._id : pb.chatId;
+                  return (
+                    <TouchableOpacity
+                      key={pb._id}
+                      style={readyToOrderStyles.card}
+                      onPress={() => navigation.navigate('PhotoBookPreview', {
+                        photoBookId: pb._id,
+                        chatId,
+                        format: pb.format,
+                      })}>
+                      <View style={readyToOrderStyles.cardInfo}>
+                        <Text style={readyToOrderStyles.cardTitle}>
+                          {bookCount > 1 ? `${bookCount} Books` : '1 Book'} · {pb.format === 'standard_14_8x21' ? 'Standard' : 'Square'}
+                        </Text>
+                        <Text style={readyToOrderStyles.cardSub}>PDF ready · ${pb.totalPrice?.toFixed(2)}</Text>
+                        <Text style={readyToOrderStyles.cardDate}>{moment(pb.createdAt).format('DD MMM YYYY')}</Text>
+                      </View>
+                      <Text style={readyToOrderStyles.cardArrow}>Order →</Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </>
+            ) : (
+              <View style={{ alignItems: "center", justifyContent: "center", marginTop: hp(6) }}>
+                <Text style={styles.subtotalTextStyle}>Your cart is empty</Text>
+                <CustomButton
+                  text="Shop Now"
+                  oddTextStyle={styles.shippingTextStyle}
+                  onPress={() => navigation.navigate("BottomTab", { screen: "ShopTab" })}
+                />
+              </View>
+            )}
           </View>
         )}
       </ScrollView>
@@ -437,3 +509,52 @@ const CartProducts: React.FC<CartProductsProps> = ({ navigation }) => {
 };
 
 export default CartProducts;
+
+const readyToOrderStyles = StyleSheet.create({
+  section: {
+    marginHorizontal: 16,
+    marginBottom: 16,
+  },
+  sectionTitle: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#2C3E50',
+    marginBottom: 12,
+    marginTop: 8,
+  },
+  card: {
+    backgroundColor: '#FFFEF7',
+    borderRadius: 12,
+    padding: 16,
+    marginBottom: 10,
+    flexDirection: 'row',
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: '#E8E4DC',
+    elevation: 2,
+  },
+  cardInfo: {
+    flex: 1,
+  },
+  cardTitle: {
+    fontSize: 15,
+    fontWeight: '600',
+    color: '#2C3E50',
+    marginBottom: 4,
+  },
+  cardSub: {
+    fontSize: 13,
+    color: '#8B8680',
+    marginBottom: 2,
+  },
+  cardDate: {
+    fontSize: 12,
+    color: '#C9A86C',
+    fontWeight: '500',
+  },
+  cardArrow: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#C9A86C',
+  },
+});

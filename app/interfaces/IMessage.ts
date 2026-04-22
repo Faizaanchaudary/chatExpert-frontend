@@ -28,6 +28,7 @@ export interface IMessage {
   url?: string;
   localPath?: string; // Local file path for media before upload
   qrUrl?: string; // S3 URL of QR code image (video/audio messages only)
+  thumbnailUrl?: string; // S3 URL of video thumbnail (video messages only)
   _id: string;
   createdAt?: string;
   updatedAt?: string;

@@ -24,6 +24,15 @@ export interface PhotoBook {
   previewUrl?: string;
   status: 'draft' | 'pdf_generated' | 'ordered' | 'completed';
   theme_config?: ThemeConfigStored | null;
+  // NEW: Multi-book support
+  books?: Array<{
+    bookNumber: number;
+    messageCount: number;
+    estimatedPages: number;
+    dateRange: { from: string; to: string };
+    generatedPdfUrl?: string;
+    status: 'pending' | 'generating' | 'completed' | 'failed';
+  }>;
   createdAt: string;
   updatedAt: string;
 }
@@ -51,12 +60,19 @@ export interface GelatoOrder {
 export function createPhotoBook(
   chatId: string,
   format: 'square_14x14' | 'standard_14_8x21',
-  pageCount: number
+  pageCount: number,
+  books?: Array<{
+    bookNumber: number;
+    messageCount: number;
+    estimatedPages: number;
+    dateRange: { from: string; to: string };
+  }>
 ): Promise<AxiosResponse<{ status: string; data: PhotoBook }>> {
   return apiClient.post('photobooks', {
     chatId,
     format,
     pageCount,
+    books,
   });
 }
 

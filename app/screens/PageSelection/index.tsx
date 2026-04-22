@@ -22,7 +22,7 @@ interface PageSelectionProps {
 }
 
 const PageSelection: React.FC<PageSelectionProps> = ({ navigation, route }) => {
-  const { format, bookspecs, chatId } = route?.params || {};
+  const { format, bookspecs, chatId, books } = route?.params || {};
   const [pageCount, setPageCount] = useState(30);
   const [basePrice, setBasePrice] = useState(29.99);
   const [totalPrice, setTotalPrice] = useState(29.99);
@@ -62,7 +62,8 @@ const PageSelection: React.FC<PageSelectionProps> = ({ navigation, route }) => {
 
     setLoading(true);
     try {
-      const response = await createPhotoBook(chatId, format, pageCount);
+      // NEW: Pass books metadata if available (for multi-book support)
+      const response = await createPhotoBook(chatId, format, pageCount, books);
       const photoBook = response.data.data;
       const photoBookId = photoBook._id;
 
@@ -94,6 +95,24 @@ const PageSelection: React.FC<PageSelectionProps> = ({ navigation, route }) => {
         <Text style={styles.subtitle}>
           Minimum: 30 pages | Maximum: 200 pages
         </Text>
+
+        {/* NEW: Multi-book indicator */}
+        {books && books.length > 0 && (
+          <View style={styles.multiBooksAlert}>
+            <Text style={styles.multiBooksTitle}>📚 Multi-Book Order</Text>
+            <Text style={styles.multiBooksText}>
+              Your chat will be split into {books.length} books:
+            </Text>
+            {books.map((book: any) => (
+              <Text key={book.bookNumber} style={styles.bookItem}>
+                • Book {book.bookNumber}: ~{book.estimatedPages} pages
+              </Text>
+            ))}
+            <Text style={styles.multiBooksNote}>
+              You'll be able to preview and order all books together.
+            </Text>
+          </View>
+        )}
 
         <View style={styles.sliderContainer}>
           <Text style={styles.pageCountText}>{pageCount} pages</Text>
@@ -227,6 +246,40 @@ const styles = StyleSheet.create({
     fontSize: rfs(24),
     fontFamily: fonts.POPPINS.Bold,
     color: COLORS.lightBlue,
+  },
+  // NEW: Multi-book alert styles
+  multiBooksAlert: {
+    backgroundColor: '#E3F2FD',
+    borderRadius: wp(2),
+    padding: wp(4),
+    marginVertical: hp(2),
+    borderLeftWidth: 4,
+    borderLeftColor: COLORS.lightBlue,
+  },
+  multiBooksTitle: {
+    fontSize: rfs(16),
+    fontFamily: fonts.POPPINS.Bold,
+    color: COLORS.textBlack,
+    marginBottom: hp(0.5),
+  },
+  multiBooksText: {
+    fontSize: rfs(14),
+    fontFamily: fonts.POPPINS.Regular,
+    color: COLORS.textBlack,
+    marginBottom: hp(1),
+  },
+  bookItem: {
+    fontSize: rfs(13),
+    fontFamily: fonts.POPPINS.Regular,
+    color: COLORS.textGray,
+    marginLeft: wp(2),
+    marginBottom: hp(0.5),
+  },
+  multiBooksNote: {
+    fontSize: rfs(12),
+    fontFamily: fonts.POPPINS.Italic,
+    color: COLORS.textGray,
+    marginTop: hp(1),
   },
 });
 

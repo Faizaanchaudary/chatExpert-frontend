@@ -48,6 +48,9 @@ import {
 import 'react-native-get-random-values';
 import { v4 as uuidv4 } from 'uuid';
 
+// NEW: Import book splitting utilities
+import { estimatePages, splitIntoBooks, splitIntoBooksWithMedia, formatDateRange, Book, BookChunk } from '../../utils/bookSplitting';
+
 // 🔥 new import
 import { FlashList } from '@shopify/flash-list';
 import { DUMMY_MESSAGES } from '../../utils/seedMessages';
@@ -64,7 +67,7 @@ import {
 import { useAppDispatch, useAppSelector } from '../../store/Store';
 import { getMimeType } from '../../utils/mediaUtils';
 import { IChat } from '../../interfaces/IChat';
-import { saveCurrentChat, saveCurrentChatMessages } from '../../store/Slice/chatSlice';
+import { saveCurrentChat, saveCurrentChatMessages, updateBookUploadStatus, appendBookMessages, clearBookData } from '../../store/Slice/chatSlice';
 import { saveChat } from '../../store/Slice/userSlice';
 import { IBookConfig } from '../../interfaces/IBookConfig';
 import { filterSystemMessages, getMostFrequentSenderName } from '../../utils/systemMessageFilter';
@@ -114,6 +117,12 @@ const Chat: React.FC<ChatProps> = ({ navigation }) => {
   const [showEditModal, setShowEditModal] = useState(false);
   const [sortOrder, setSortOrder] = useState('of');
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(0);
+  const [isProcessing, setIsProcessing] = useState(false); // Backend processing state
+  
+  // Search functionality states
+  const [searchMatches, setSearchMatches] = useState<string[]>([]); // Array of message IDs that match
+  const [currentMatchIndex, setCurrentMatchIndex] = useState(0); // Current highlighted match
 
   // const [hideName, setHideName] = useState(false);
   // const [dateFormat, setDateFormat] = useState('DD/MM/YYYY hh:mm A');
@@ -130,17 +139,9 @@ const Chat: React.FC<ChatProps> = ({ navigation }) => {
 
   // Use estimated total height for stable scrollbar (FlashList contentHeight fluctuates due to virtualization)
   const ESTIMATED_ITEM_SIZE = 60;
-  const estimatedTotalHeight = chatMessages.length * ESTIMATED_ITEM_SIZE;
-  const stableMaxScroll = Math.max(1, estimatedTotalHeight - screenHeight);
 
   const thumbTravel = Math.max(0, trackLayout.height - 20);
   const maxScroll = Math.max(1, contentHeight - screenHeight);
-
-  const thumbPosition = scrollY.interpolate({
-    inputRange: [0, stableMaxScroll],
-    outputRange: [0, thumbTravel],
-    extrapolate: 'clamp',
-  });
 
 
 
@@ -165,13 +166,12 @@ const Chat: React.FC<ChatProps> = ({ navigation }) => {
       .catch(err => {
         const msg = err?.response?.data?.message || err?.message || 'Could not create chat';
         setChatCreationError(msg);
-        console.log('Error in chat creation:', msg);
+        console.error('Error in chat creation:', msg);
       });
   }, [user?._id, bookConfig]);
 
   useEffect(() => {
     if (user?._id) {
-      console.log('Creating chat for user:', user._id);
       createChatOnce();
     }
   }, [user?._id, createChatOnce]);
@@ -185,7 +185,6 @@ const Chat: React.FC<ChatProps> = ({ navigation }) => {
 
   useEffect(() => {
     if (!user) {
-      console.log('⚠️ User not logged in, skipping IntentReceived listener setup');
       return;
     }
     const eventEmitter = new NativeEventEmitter();
@@ -194,10 +193,8 @@ const Chat: React.FC<ChatProps> = ({ navigation }) => {
       if (uri) {
         // Process regardless of focus state, but show warning
         if (isFocused) {
-          console.log('✅ Screen is focused, processing URI...');
           loadViaRoute(uri);
         } else {
-          console.warn('⚠️ Screen not focused, but will process anyway');
           // Process anyway - focus check might be stale
           loadViaRoute(uri);
         }
@@ -207,10 +204,7 @@ const Chat: React.FC<ChatProps> = ({ navigation }) => {
       }
     });
 
-    console.log('✅ Listener registered successfully');
-
     return () => {
-      console.log('🔄 Removing IntentReceived listener');
       subscription.remove();
     };
   }, [user, isFocused]);
@@ -223,7 +217,6 @@ const Chat: React.FC<ChatProps> = ({ navigation }) => {
       }
 
       setIsLoading(true);
-      console.log('Starting to load WhatsApp export from URI:', uri);
 
       const zipFileUri = uri;
       let zipFilePath;
@@ -231,19 +224,15 @@ const Chat: React.FC<ChatProps> = ({ navigation }) => {
       // Handle different URI schemes
       if (Platform.OS === 'android' && zipFileUri.startsWith('content://')) {
         // content:// URIs need to be copied via ContentResolver
-        console.log('Converting content:// URI to file path...');
         const destPath = `${RNFS.TemporaryDirectoryPath}/${Math.random()}.zip`;
 
         try {
           // Use ContentResolverModule for content:// URIs (fixes WhatsApp permission issue)
           const { ContentResolverModule } = NativeModules;
           if (ContentResolverModule) {
-            console.log('Using ContentResolverModule to copy file...');
             await ContentResolverModule.copyContentUriToFile(zipFileUri, destPath);
-            console.log('✅ File copied using ContentResolver');
           } else {
             // Fallback to RNFS (may fail with WhatsApp URIs)
-            console.log('⚠️ ContentResolverModule not found, using RNFS...');
             await RNFS.copyFile(zipFileUri, destPath);
           }
         } catch (copyError: any) {
@@ -252,11 +241,9 @@ const Chat: React.FC<ChatProps> = ({ navigation }) => {
         }
 
         zipFilePath = destPath;
-        console.log('File copied to:', destPath);
       } else if (zipFileUri.startsWith('file://')) {
         // file:// URIs - strip the prefix to get raw path
         zipFilePath = zipFileUri.replace('file://', '');
-        console.log('Using file:// URI, stripped path:', zipFilePath);
       } else {
         // Raw file path
         zipFilePath = zipFileUri;
@@ -268,25 +255,16 @@ const Chat: React.FC<ChatProps> = ({ navigation }) => {
       // Check if the extraction folder already exists and delete it if it does
       const folderExists = await RNFS.exists(targetPath);
       if (folderExists) {
-        console.log('Removing old extracted directory...');
         await RNFS.unlink(targetPath);
       }
 
       // Unzip the file
-      console.log('Unzipping file...');
       const unzippedPath = await unzip(zipFilePath, targetPath);
-      console.log('Unzipped to:', unzippedPath);
 
-      console.log('Getting file information...');
       const filesMetaData = await getFilesInformation(unzippedPath);
-      console.log(
-        `Found ${filesMetaData.mediaFiles.length} media files and text file`,
-      );
 
       // Process the extracted chat file
-      console.log('Reading chat content...');
       const rawChatContent = await getFileContent(filesMetaData.textFile);
-      console.log('Chat content length:', rawChatContent.length);
 
       // Deterministic parser (NO LLM): build media map + parse sequentially.
       const mediaFilesMap = buildMediaFilesMap(
@@ -294,15 +272,12 @@ const Chat: React.FC<ChatProps> = ({ navigation }) => {
       );
       const parsed = parseWhatsAppChatTextDetailed(rawChatContent, mediaFilesMap);
 
-      console.log('Messages parsed:', parsed.messages.length);
-      console.log('Media linked:', parsed.mediaLinked);
       if (parsed.messages.length === 0) {
         const previewLines = rawChatContent
           .replace(/\r\n/g, '\n')
           .replace(/\r/g, '\n')
           .split('\n')
           .slice(0, 8);
-        console.log('Parser debug: first lines of chat.txt:', previewLines);
       }
 
       const parsedAsChatMessages: IMessage[] = parsed.messages.map(m => ({
@@ -319,21 +294,22 @@ const Chat: React.FC<ChatProps> = ({ navigation }) => {
       // Remove system / meta messages but preserve user message order.
       const userMessages = filterSystemMessages(parsedAsChatMessages);
       const meName = getMostFrequentSenderName(userMessages);
-      setChatMessages(
-        userMessages.map(m => ({
-          ...m,
-          sender:
-            meName != null &&
-            (m.senderName || '').trim() === meName &&
-            (m.senderName || '').trim().toLowerCase() !== 'system',
-        })),
-      );
+      const finalMessages = userMessages.map(m => ({
+        ...m,
+        sender:
+          meName != null &&
+          (m.senderName || '').trim() === meName &&
+          (m.senderName || '').trim().toLowerCase() !== 'system',
+      }));
+      
+      setChatMessages(finalMessages);
 
       setWhatsappChatData({
         mediaFiles: filesMetaData.mediaFiles,
         chatText: rawChatContent,
       });
 
+      // Show simple success message
       Alert.alert(
         'Success',
         `Chat loaded successfully!\nFound ${filesMetaData.mediaFiles.length} media files`,
@@ -387,14 +363,14 @@ const Chat: React.FC<ChatProps> = ({ navigation }) => {
   //         unzippedPath,
   //         route.params?.bookspecs,
   //       );
-  //       console.log('here 5');
+
   //       if (chatData) setChatData(chatData); // Update state with the new chat data
   //     }
   //   } catch (error) {
   //     if (DocumentPicker.isCancel(error)) {
-  //       console.log('User canceled the picker');
+
   //     } else {
-  //       console.error('Error picking ZIP file:', error);
+
   //     }
   //   } finally {
   //     setIsLoading(false);
@@ -435,7 +411,6 @@ const Chat: React.FC<ChatProps> = ({ navigation }) => {
             try {
               if (CustomIntent?.openApp) {
                 await CustomIntent.openApp('com.whatsapp');
-                console.log('WhatsApp launched successfully');
               } else {
                 Alert.alert(
                   'Not available',
@@ -444,7 +419,6 @@ const Chat: React.FC<ChatProps> = ({ navigation }) => {
                 );
               }
             } catch (error: any) {
-              console.warn('Could not open WhatsApp:', error?.message || '');
               Alert.alert(
                 'Could not open WhatsApp',
                 'Use "Pick exported ZIP file" to choose your chat export from the app.',
@@ -462,7 +436,6 @@ const Chat: React.FC<ChatProps> = ({ navigation }) => {
             try {
               if (CustomIntent?.openApp) {
                 await CustomIntent.openApp('com.whatsapp.w4b');
-                console.log('WhatsApp Business launched successfully');
               } else {
                 Alert.alert(
                   'Not available',
@@ -471,7 +444,6 @@ const Chat: React.FC<ChatProps> = ({ navigation }) => {
                 );
               }
             } catch (error: any) {
-              console.warn('Could not open WhatsApp Business:', error?.message || '');
               Alert.alert(
                 'Could not open WhatsApp Business',
                 'Use "Pick exported ZIP file" to choose your chat export from the app.',
@@ -543,6 +515,58 @@ const Chat: React.FC<ChatProps> = ({ navigation }) => {
     setSortOrder(filter[0]?.text == 'Newest First' ? 'nf' : 'of');
   };
 
+  // NEW: Get messages to display (filtered by date if dates selected)
+  const messagesToDisplay = React.useMemo(() => {
+    if (!dated || !datedTo) {
+      return chatMessages;
+    }
+    
+    // dated and datedTo are JavaScript Date objects from DateRangePicker
+    const fromDate = new Date(dated);
+    const toDate = new Date(datedTo);
+    // Set toDate to end of day so messages on that day are included
+    toDate.setHours(23, 59, 59, 999);
+    
+    const filtered = chatMessages.filter(m => {
+      const rawDate = m.date || m.sendingTime || '';
+      
+      // Parse DD/MM/YYYY format (WhatsApp date format)
+      let msgDate: Date | null = null;
+      if (rawDate.includes('/')) {
+        const parts = rawDate.split('/');
+        if (parts.length >= 3) {
+          const day = parseInt(parts[0], 10);
+          const month = parseInt(parts[1], 10) - 1; // months are 0-indexed
+          const year = parseInt(parts[2], 10);
+          msgDate = new Date(year, month, day);
+        }
+      } else if (rawDate) {
+        msgDate = new Date(rawDate);
+      }
+      
+      if (!msgDate || isNaN(msgDate.getTime())) {
+        return false;
+      }
+      
+      return msgDate >= fromDate && msgDate <= toDate;
+    });
+    
+    // Date filtering completed
+    
+    setChatDataFiltered(filtered);
+    return filtered;
+  }, [chatMessages, dated, datedTo]);
+
+  // Calculate scroll values after messagesToDisplay is defined
+  const estimatedTotalHeight = messagesToDisplay.length * ESTIMATED_ITEM_SIZE;
+  const stableMaxScroll = Math.max(1, estimatedTotalHeight - screenHeight);
+
+  const thumbPosition = scrollY.interpolate({
+    inputRange: [0, stableMaxScroll],
+    outputRange: [0, thumbTravel],
+    extrapolate: 'clamp',
+  });
+
   const deselectAll = (array: any, setArray: any) => {
     // Log the index to ensure it's correct
 
@@ -606,13 +630,7 @@ const Chat: React.FC<ChatProps> = ({ navigation }) => {
 
   const onSelectAll = () => {
     if (dated) {
-      // console.log("Filtered", chatDataFiltered);
-      // chatCardRefs.current.forEach((chatCardRef: any) => {
-      //   console.log("chatCardRef", chatCardRef);
-      //   if (chatCardRef && chatCardRef.check) {
-      //     chatCardRef.check();
-      //   }
-      // });
+
       select(chatMessages, chatDataFiltered);
       // });
       return;
@@ -627,9 +645,7 @@ const Chat: React.FC<ChatProps> = ({ navigation }) => {
 
   const onDeselectAll = () => {
     if (dated) {
-      console.log('Filtered', chatDataFiltered);
       // chatCardRefs.current.forEach((chatCardRef: any) => {
-      //   console.log("chatCardRef", chatCardRef);
       //   if (chatCardRef && chatCardRef.uncheck) {
       //     chatCardRef.uncheck();
       //   }
@@ -645,6 +661,200 @@ const Chat: React.FC<ChatProps> = ({ navigation }) => {
 
     deselectAll(chatMessages, setChatMessages);
     // });
+  };
+
+  /**
+   * Upload a single book (media + messages)
+   * Returns { success: boolean, error?: string, qrMap, thumbnailMap }
+   */
+  const uploadSingleBook = async (
+    chatId: string,
+    bookChunk: BookChunk,
+    onProgress?: (percent: number) => void
+  ): Promise<{ success: boolean; error?: string; qrMap?: Record<string, string>; thumbnailMap?: Record<string, string> }> => {
+    try {
+      let qrMap: Record<string, string> = {};
+      let thumbnailMap: Record<string, string> = {};
+      let updatedChat: IChat | null = null;
+      
+      // Upload media files for this book
+      if (bookChunk.mediaFiles.length > 0) {
+        const data = new FormData();
+        bookChunk.mediaFiles.forEach((file: any) => {
+          const fileUri = file.path.startsWith('file://') ? file.path : `file://${file.path}`;
+          data.append('files', {
+            uri: fileUri,
+            name: file.name,
+            type: getMimeType(file.name),
+          } as any);
+        });
+        
+        const chatResponse = await uploadChatMedia(chatId, data, onProgress);
+        updatedChat = chatResponse.data.data;
+        qrMap = chatResponse.data.qrMap || {};
+        thumbnailMap = chatResponse.data.thumbnailMap || {};
+      }
+      
+      // Upload messages for this book
+      const messagesPayload = bookChunk.messages.map((m, messageIndex) => {
+        const payload: any = {
+          date: m.date || '',
+          messageType: ((m.messageType === 'unknown' ? 'text' : m.messageType) as MessageType),
+          senderName: m.senderName,
+          sendingTime: m.sendingTime,
+          text: m.text,
+        };
+        
+        // Media URL mapping
+        if ((m.messageType === 'image' || m.messageType === 'video' || m.messageType === 'audio') && m.localPath) {
+          const filename = m.localPath.split('/').pop();
+          
+          if (updatedChat?.mediaFiles && Array.isArray(updatedChat.mediaFiles)) {
+            let mediaCountBeforeThis = 0;
+            for (let i = 0; i < messageIndex; i++) {
+              const prevMsg = bookChunk.messages[i];
+              if ((prevMsg.messageType === 'image' || prevMsg.messageType === 'video' || prevMsg.messageType === 'audio') && prevMsg.localPath) {
+                mediaCountBeforeThis++;
+              }
+            }
+            
+            let uploadedFile = updatedChat.mediaFiles[mediaCountBeforeThis];
+            
+            if (uploadedFile && uploadedFile.name === filename) {
+              payload.url = uploadedFile.url;
+              if ((m.messageType === 'video' || m.messageType === 'audio') && filename && qrMap[filename]) {
+                payload.qrUrl = qrMap[filename];
+              }
+              if (m.messageType === 'video' && filename && thumbnailMap[filename]) {
+                payload.thumbnailUrl = thumbnailMap[filename];
+              }
+            } else {
+              uploadedFile = updatedChat.mediaFiles.find((mf: any) => mf.name === filename);
+              if (uploadedFile?.url) {
+                payload.url = uploadedFile.url;
+                if ((m.messageType === 'video' || m.messageType === 'audio') && filename && qrMap[filename]) {
+                  payload.qrUrl = qrMap[filename];
+                }
+                if (m.messageType === 'video' && filename && thumbnailMap[filename]) {
+                  payload.thumbnailUrl = thumbnailMap[filename];
+                }
+              }
+            }
+          }
+        }
+        
+        return payload;
+      });
+      
+
+      await bulkMessages(chatId, messagesPayload);
+      
+      return { success: true, qrMap, thumbnailMap };
+    } catch (error: any) {
+      console.error(`❌ Book ${bookChunk?.bookNumber || 'unknown'} upload failed:`, error);
+      return { success: false, error: error.message || 'Upload failed' };
+    }
+  };
+
+  /**
+   * Upload remaining books in background (non-blocking, SEQUENTIAL)
+   * Books upload ONE AT A TIME: Book 2 waits for Book 1, Book 3 waits for Book 2, etc.
+   */
+  const uploadRemainingBooksInBackground = (
+    chatId: string,
+    remainingBooks: BookChunk[],
+    totalBooks: number
+  ) => {
+    // Use setTimeout to make it non-blocking (don't block navigation)
+    setTimeout(async () => {
+      // Upload books SEQUENTIALLY (one at a time)
+      for (let i = 0; i < remainingBooks.length; i++) {
+        const book = remainingBooks[i];
+        
+        try {
+          // Update status to "uploading"
+          dispatch(updateBookUploadStatus({
+            chatId,
+            bookNumber: book.bookNumber,
+            status: 'uploading',
+            progress: 0,
+          }));
+          
+          // AWAIT here ensures Book 2 waits for Book 1 to finish
+          const result = await uploadSingleBook(chatId, book, (progress) => {
+            // Update progress in Redux
+            dispatch(updateBookUploadStatus({
+              chatId,
+              bookNumber: book.bookNumber,
+              status: 'uploading',
+              progress,
+            }));
+          });
+          
+          if (result.success) {
+            // Merge qrUrl and thumbnailUrl into messages
+            const finalMessages = book.messages.map(m => {
+              if ((m.messageType === 'video' || m.messageType === 'audio') && m.localPath) {
+                const filename = m.localPath.split('/').pop();
+                const updates: any = {};
+                if (filename && result.qrMap && result.qrMap[filename]) {
+                  updates.qrUrl = result.qrMap[filename];
+                }
+                if (m.messageType === 'video' && filename && result.thumbnailMap && result.thumbnailMap[filename]) {
+                  updates.thumbnailUrl = result.thumbnailMap[filename];
+                }
+                if (Object.keys(updates).length > 0) {
+                  return { ...m, ...updates };
+                }
+              }
+              return m;
+            });
+            
+            // Update status to "completed"
+            dispatch(updateBookUploadStatus({
+              chatId,
+              bookNumber: book.bookNumber,
+              status: 'completed',
+              progress: 100,
+            }));
+            
+            // Add messages to Redux
+            dispatch(appendBookMessages({
+              chatId,
+              bookNumber: book.bookNumber,
+              messages: finalMessages,
+            }));
+            
+          } else {
+            console.error(`❌ Book ${book.bookNumber} upload failed: ${result.error}`);
+            
+            // Update status to "failed"
+            dispatch(updateBookUploadStatus({
+              chatId,
+              bookNumber: book.bookNumber,
+              status: 'failed',
+              progress: 0,
+              error: result.error,
+            }));
+            
+            // STOP uploading remaining books if one fails
+            break;
+          }
+          
+        } catch (error: any) {
+          dispatch(updateBookUploadStatus({
+            chatId,
+            bookNumber: book.bookNumber,
+            status: 'failed',
+            progress: 0,
+            error: error.message,
+          }));
+          
+          // STOP uploading remaining books if one fails
+          break;
+        }
+      }
+    }, 100); // Start background upload after 100ms (non-blocking)
   };
 
   const onPressDone = async () => {
@@ -676,215 +886,90 @@ const Chat: React.FC<ChatProps> = ({ navigation }) => {
       }
 
       setIsSubmitting(true);
-      let updatedChat: IChat | null = null;
 
-      let qrMap: Record<string, string> = {};
-
-      if (whatsappChatData?.mediaFiles?.length) {
-        const data = new FormData();
-        whatsappChatData.mediaFiles.forEach(file => {
-          const fileUri = file.path.startsWith('file://')
-            ? file.path
-            : `file://${file.path}`;
-
-          data.append('files', {
-            uri: fileUri,
-            name: file.name,
-            type: getMimeType(file.name),
-          });
-        });
-
-        const chatResponse = await uploadChatMedia(chatToUse._id, data);
-        updatedChat = chatResponse.data.data;
-        qrMap = chatResponse.data.qrMap || {};
-
-        if (updatedChat) {
-          setChat(updatedChat);
-          chatToUse = updatedChat;
-        }
-      }
-
-      const messagesPayload = chatMessages.map((m, messageIndex) => {
-        const payload: any = {
-          date: m.date || '',
-          messageType: ((m.messageType === 'unknown' ? 'text' : m.messageType) as MessageType),
-          senderName: m.senderName,
-          sendingTime: m.sendingTime,
-          text: m.text,
-        };
-
-        // If message has media (image/video/audio), find the uploaded URL from chat
-        if ((m.messageType === 'image' || m.messageType === 'video' || m.messageType === 'audio') && m.localPath) {
-          // Extract filename from localPath
-          const filename = m.localPath.split('/').pop();
-          
-          if (chatToUse.mediaFiles && Array.isArray(chatToUse.mediaFiles)) {
-            // Count how many media messages came before this one
-            let mediaCountBeforeThis = 0;
-            for (let i = 0; i < messageIndex; i++) {
-              const prevMsg = chatMessages[i];
-              if ((prevMsg.messageType === 'image' || prevMsg.messageType === 'video' || prevMsg.messageType === 'audio') && prevMsg.localPath) {
-                mediaCountBeforeThis++;
-              }
-            }
-            
-            // Try index-based matching first (handles duplicate filenames)
-            let uploadedFile = chatToUse.mediaFiles[mediaCountBeforeThis];
-            
-            // Verify filename matches (safety check)
-            if (uploadedFile && uploadedFile.name === filename) {
-              payload.url = uploadedFile.url;
-              // Attach qrUrl for video/audio
-              if ((m.messageType === 'video' || m.messageType === 'audio') && filename && qrMap[filename]) {
-                payload.qrUrl = qrMap[filename];
-              }
-            } else {
-              // Fallback: search by filename only
-              uploadedFile = chatToUse.mediaFiles.find((mf: any) => mf.name === filename);
-              if (uploadedFile?.url) {
-                payload.url = uploadedFile.url;
-                if ((m.messageType === 'video' || m.messageType === 'audio') && filename && qrMap[filename]) {
-                  payload.qrUrl = qrMap[filename];
-                }
-              }
-            }
-          }
-        }
-
-        return payload;
-      });
-
-      await bulkMessages(chatToUse._id, messagesPayload);
-
-      const finalChat = { ...(updatedChat || chatToUse), bookConfig: bookConfig };
-      // Merge qrUrl into local messages so Redux has them for preview
-      const finalMessages = chatMessages.map(m => {
-        if ((m.messageType === 'video' || m.messageType === 'audio') && m.localPath) {
-          const filename = m.localPath.split('/').pop();
-          if (filename && qrMap[filename]) {
-            return { ...m, qrUrl: qrMap[filename] };
-          }
-        }
-        return m;
-      });
-
-      // Generate a unique ID for this saved chat
-      const savedChatId = uuidv4();
-
-      // Save to current chat (for immediate viewing)
+      // Filter only checked messages (from displayed messages, respecting date filter)
+      const checkedMessages = messagesToDisplay.filter(m => m.isCheck === true);
+      
+      const format = (route?.params as any)?.format || 'standard_14_8x21';
+      
+      // 🔥 NEW FLOW: Skip estimation, go directly to Preview for accurate calculation
+      console.log(`📚 NEW FLOW: Navigating to Preview for accurate page calculation`);
+      console.log(`📚 Total messages: ${checkedMessages.length}, format: ${format}`);
+      
+      // Save chat and messages to Redux for Preview to access
+      const finalChat: IChat = {
+        _id: chatToUse._id,
+        author: chatToUse.author,
+        mediaFiles: chatToUse.mediaFiles || [],
+        createdAt: chatToUse.createdAt,
+        updatedAt: chatToUse.updatedAt,
+        platform: 'whatsapp',
+        totalMessages: checkedMessages.length,
+        status: 'active',
+        importedAt: new Date().toISOString(),
+        bookConfig: bookConfig || {
+          fontFamily: fonts.ROBOTO.Medium,
+          fontSize: 10,
+          fontStyle: 'regular',
+          chatBackground: '#E5DDD5',
+          hideName: false,
+          senderBackground: '#D9FDD3',
+          senderTextColor: '#111B21',
+          receiverBackground: '#FFFFFF',
+          receiverTextColor: '#111B21',
+          dateFormat: 'DD/MM/YYYY hh:mm A',
+        },
+      };
+      
       dispatch(saveCurrentChat(finalChat));
-      dispatch(saveCurrentChatMessages(finalMessages));
-
-      // Save to savedChats array (for persistence as separate cards)
-      dispatch(
-        saveChat({
-          id: savedChatId,
-          chat: {
-            ...finalChat,
-            messages: finalMessages,
-            timestamp: new Date().toISOString(),
-          },
-        }),
+      dispatch(saveCurrentChatMessages(checkedMessages));
+      
+      // Only pass media files that are referenced by checked messages
+      const checkedLocalPaths = new Set(
+        checkedMessages
+          .filter(m => m.localPath)
+          .map(m => m.localPath!.split('/').pop())
       );
-
-      // Check if we're in photo book flow
-      const photoBookFlow = route?.params?.photoBookFlow;
-      const format = route?.params?.format;
-      const bookspecs = route?.params?.bookspecs;
-
-      if (photoBookFlow && finalChat?._id) {
-        // Navigate to PageSelection instead of going back
-        navigation.navigate('PageSelection', {
-          chatId: finalChat._id,
-          format: format,
-          bookspecs: bookspecs,
-        });
+      const filteredMediaFiles = (whatsappChatData?.mediaFiles || []).filter(
+        (f: any) => checkedLocalPaths.has(f.name)
+      );
+      
+      // Navigate to Preview with calculation mode enabled
+      navigation.navigate('PhotoBookPreview', {
+        chatId: chatToUse._id,
+        format,
+        needsCalculation: true,
+        mediaFiles: filteredMediaFiles,
+        bookspecs: (route?.params as any)?.bookspecs,
+      });
+      
+      setIsSubmitting(false);
+      
+      // OLD FLOW REMOVED - No more estimation-based splitting
+      // The Preview page will now handle:
+      // 1. Accurate page calculation using layout
+      // 2. Splitting at exactly 200 pages if needed
+      // 3. Uploading books with correct splits
+      
+      /* OLD CODE COMMENTED OUT - Kept for reference
+      
+      const estimatedPages = estimatePages(checkedMessages, format);
+      
+      if (estimatedPages > 200) {
+        ... multi-book flow ...
       } else {
-        navigation.goBack();
+        ... single-book flow ...
       }
-
-      // console.log('Messages uploaded', response.data.data);
+      */
+      
     } catch (error) {
-      console.log('Messages upload failed :: ', error);
-      Alert.alert('Error', 'Chat not saved correctly. Please try again.');
+      console.error('Error in onPressDone:', error);
+      Alert.alert('Error', 'Failed to process chat. Please try again.');
     } finally {
       setIsSubmitting(false);
+      setUploadProgress(0);
+      setIsProcessing(false);
     }
-
-    // const jsonManipulator = chatData?.map(item => {
-    //   if (item?.isCheck) {
-    //     // Determine the limit based on the device (tablet or phone)
-
-    //     const charLimit = isTablet ? 300 : 200;
-
-    //     // If the senderMessage is shorter than the limit, return the item as is
-    //     if (item?.text?.length <= charLimit) {
-    //       return {
-    //         item,
-    //         fontFamily,
-    //         fontSize,
-    //         fontStyle,
-    //         chatBackground,
-    //         hideName,
-    //         senderBackground,
-    //         senderTextColor,
-    //         receiverBackground,
-    //         receiverTextColor,
-    //         dateFormat,
-    //       };
-    //     } else {
-    //       // If the message is longer, split it into multiple parts
-    //       const messageParts = item?.text.match(
-    //         new RegExp(`.{1,${charLimit}}`, 'g'),
-    //       );
-    //       const newItems = messageParts?.map(part => ({
-    //         ...item,
-    //         senderMessage: part,
-    //         fontFamily,
-    //         fontSize,
-    //         fontStyle,
-    //         chatBackground,
-    //         hideName,
-    //         senderBackground,
-    //         senderTextColor,
-    //         receiverBackground,
-    //         receiverTextColor,
-    //         dateFormat,
-
-    //         // Optionally, adjust the sendingTime for each part if needed
-    //         sendingTime: item?.sendingTime,
-    //         // Adjust other properties as necessary
-    //       }));
-
-    //       return newItems; // Return the array of split messages
-    //     }
-    //   }
-    // });
-
-    // // Flatten the array in case some messages were split into multiple parts
-    // const flattenedJsonManipulator = [].concat(...jsonManipulator);
-    // const filter: any[] = flattenedJsonManipulator?.filter(item => {
-    //   return item != undefined;
-    // });
-
-    // console.log('Filter length', filter.length);
-
-    // let chatBubbles = await Promise.all(
-    //   filter.map((item: any, index: number) => {
-    //     return {...item, id: index, bookspecs: route?.params?.bookspecs};
-    //   }),
-    // );
-
-    // // console.log('Added ID:', JSON.stringify(addedId, null, 2));
-
-    // // // return;
-
-    // // // route?.params?.setChat({ nonchat: addedId, chat: chatData });
-    // route?.params?.setFontFamily(fontFamily);
-    // route?.params?.setFontStyle(fontStyle);
-    // route?.params?.addChatToPage(chatBubbles, route?.params?.index);
-
-    // navigation.goBack();
   };
 
   const handleToggleCheck = useCallback((messageId: string) => {
@@ -895,19 +980,83 @@ const Chat: React.FC<ChatProps> = ({ navigation }) => {
     );
   }, []);
 
+  // Scroll to a specific message by ID (in displayed messages)
+  const scrollToMessage = useCallback((messageId: string) => {
+    const index = messagesToDisplay.findIndex(msg => msg._id === messageId);
+    if (index !== -1 && scrollViewRef.current) {
+      scrollViewRef.current.scrollToIndex({
+        index,
+        animated: true,
+        viewPosition: 0.5, // Center the message on screen
+      });
+    }
+  }, [messagesToDisplay]);
+
+  // Search functionality: Find all matching messages (in displayed messages only)
+  useEffect(() => {
+    if (search.trim()) {
+      const matches = messagesToDisplay
+        .filter(msg =>
+          msg.messageType === 'text' &&
+          msg.text?.toLowerCase().includes(search.toLowerCase())
+        )
+        .map(msg => msg._id);
+      
+      setSearchMatches(matches);
+      setCurrentMatchIndex(matches.length > 0 ? 0 : -1);
+      
+      // Auto-scroll to first match
+      if (matches.length > 0) {
+        scrollToMessage(matches[0]);
+      }
+    } else {
+      setSearchMatches([]);
+      setCurrentMatchIndex(-1);
+    }
+  }, [search, messagesToDisplay, scrollToMessage]);
+
+  // Navigate to next search match
+  const handleNextMatch = useCallback(() => {
+    if (searchMatches.length === 0) return;
+    
+    const nextIndex = (currentMatchIndex + 1) % searchMatches.length;
+    setCurrentMatchIndex(nextIndex);
+    scrollToMessage(searchMatches[nextIndex]);
+  }, [searchMatches, currentMatchIndex, scrollToMessage]);
+
+  // Navigate to previous search match
+  const handlePrevMatch = useCallback(() => {
+    if (searchMatches.length === 0) return;
+    
+    const prevIndex = currentMatchIndex === 0 
+      ? searchMatches.length - 1 
+      : currentMatchIndex - 1;
+    setCurrentMatchIndex(prevIndex);
+    scrollToMessage(searchMatches[prevIndex]);
+  }, [searchMatches, currentMatchIndex, scrollToMessage]);
+
   // 📌 FlashList render – full-width row so ChatCard alignSelf (left/right) works
   const renderChats = useCallback(
-    ({ item, index }: { item: IMessage; index: number }) => (
-      <View style={styles.messageRow}>
-        <ChatCard
-          item={item}
-          index={index}
-          stylesConfig={bookConfig}
-          checkPress={() => handleToggleCheck(item._id)}
-        />
-      </View>
-    ),
-    [bookConfig, handleToggleCheck],
+    ({ item, index }: { item: IMessage; index: number }) => {
+      const isCurrentMatch = searchMatches.length > 0 && 
+        item._id === searchMatches[currentMatchIndex];
+      const isMatch = searchMatches.includes(item._id);
+      
+      return (
+        <View style={styles.messageRow}>
+          <ChatCard
+            item={item}
+            index={index}
+            stylesConfig={bookConfig}
+            checkPress={() => handleToggleCheck(item._id)}
+            searchQuery={search}
+            isCurrentMatch={isCurrentMatch}
+            isMatch={isMatch}
+          />
+        </View>
+      );
+    },
+    [bookConfig, handleToggleCheck, search, searchMatches, currentMatchIndex],
   );
 
   return (
@@ -917,6 +1066,10 @@ const Chat: React.FC<ChatProps> = ({ navigation }) => {
           setSearchBarState={setSearchBarState}
           value={search}
           onChangeText={(txt: any) => setSearch(txt)}
+          onPressNext={handleNextMatch}
+          onPressPrev={handlePrevMatch}
+          matchCount={searchMatches.length}
+          currentMatch={searchMatches.length > 0 ? currentMatchIndex + 1 : 0}
         />
       ) : (
         <CustomHeader
@@ -930,7 +1083,7 @@ const Chat: React.FC<ChatProps> = ({ navigation }) => {
                 [
                   {
                     text: 'No',
-                    onPress: () => console.log('Cancel Pressed'),
+                    onPress: () => {},
                     style: 'cancel', // Optional: styles the button as a cancel button
                   },
                   {
@@ -954,7 +1107,7 @@ const Chat: React.FC<ChatProps> = ({ navigation }) => {
                 [
                   {
                     text: 'No',
-                    onPress: () => console.log('Cancel Pressed'),
+                    onPress: () => {},
                     style: 'cancel', // Optional: styles the button as a cancel button
                   },
                   {
@@ -995,13 +1148,14 @@ const Chat: React.FC<ChatProps> = ({ navigation }) => {
           </Text>
         </>
       ) : null}
-      {chatMessages.length > 0 ? (
+      {messagesToDisplay.length > 0 ? (
 
         <>
           <FlashList
             ref={scrollViewRef}
-            data={chatMessages}
+            data={messagesToDisplay}
             renderItem={renderChats}
+            extraData={{search, searchMatches, currentMatchIndex, dated, datedTo}} // Force re-render on search/date changes
             getItemType={item => {
               if (item.messageType) return item.messageType;
               return 'text';
@@ -1053,6 +1207,14 @@ const Chat: React.FC<ChatProps> = ({ navigation }) => {
             )}
           </TouchableOpacity>
         </>
+      ) : chatMessages.length > 0 ? (
+        // Show message when date filter returns no results
+        <View style={styles.loaderContainer}>
+          <Text style={{ color: 'black', textAlign: 'center', marginTop: 50 }}>
+            No messages found in selected date range.{'\n'}
+            Try adjusting the date filter or clear it to see all messages.
+          </Text>
+        </View>
       ) : (
         <>
           <TouchableOpacity onPress={handlePickFolder}>
@@ -1072,7 +1234,6 @@ const Chat: React.FC<ChatProps> = ({ navigation }) => {
             </Text>
           </TouchableOpacity>
 
-
           {/* <TouchableOpacity
             onPress={handlePickFolderTest}
             style={{marginTop: 10}}>
@@ -1087,9 +1248,9 @@ const Chat: React.FC<ChatProps> = ({ navigation }) => {
           </TouchableOpacity> */}
         </>
       )}
-      {search == '' && (
+      {!searchBarState && (
         <>
-          {chatMessages?.length > 0 ? (
+          {messagesToDisplay?.length > 0 ? (
             <TouchableOpacity
               style={styles.threeDotIcnContainer}
               onPress={() => setShowSelectionModal(true)}>
@@ -1098,9 +1259,9 @@ const Chat: React.FC<ChatProps> = ({ navigation }) => {
           ) : null}
         </>
       )}
-      {search == '' && (
+      {!searchBarState && (
         <View style={styles.bottomButtonContainer}>
-          {chatMessages?.length > 0 ? (
+          {messagesToDisplay?.length > 0 ? (
             <CustomButton
               text="Edit"
               oddContainerStyle={styles.customButtonOddContainer}
@@ -1131,7 +1292,13 @@ const Chat: React.FC<ChatProps> = ({ navigation }) => {
               <CustomButton
                 animating={isSubmitting}
                 disable={isSubmitting}
-                text="Done"
+                text={
+                  isProcessing 
+                    ? 'Processing media...' 
+                    : uploadProgress > 0 && uploadProgress < 100 
+                      ? `Uploading ${uploadProgress}%` 
+                      : 'Done'
+                }
                 oddContainerStyle={[styles.customButtonOddContainer, styles.doneButton]}
                 oddTextStyle={styles.oddTextStyle}
                 onPress={onPressDone}
@@ -1140,26 +1307,16 @@ const Chat: React.FC<ChatProps> = ({ navigation }) => {
           ) : null}
         </View>
       )}
-      {search && (
+      {searchBarState && (
         <CustomButton
           text="Done"
           oddContainerStyle={styles.customButtonOddContainerForSearch}
           oddTextStyle={styles.oddTextStyle}
           onPress={() => {
-            // When closing search, ensure the main chatMessages reflects the current selection state
-            const updatedChatData = chatMessages.map((item: any) => {
-              const filteredItem = chatDataFiltered.find(
-                filtered => filtered._id === item.id,
-              );
-              if (filteredItem) {
-                return { ...item, isCheck: filteredItem.isCheck };
-              }
-              return item;
-            });
-
-            setChatMessages(updatedChatData);
             setSearchBarState(false);
             setSearch('');
+            setSearchMatches([]);
+            setCurrentMatchIndex(-1);
           }}
         />
       )}
@@ -1199,8 +1356,7 @@ const Chat: React.FC<ChatProps> = ({ navigation }) => {
         setShowSortMessageModal={setShowSortMessageModal}
         showSortMessageModal={showSortMessageModal}
         setShowEditModal={setShowEditModal}
-        returnSorted={val => {
-          console.log('val', val);
+        returnSorted={(val: any) => {
           sortMessages(val);
         }}
       />

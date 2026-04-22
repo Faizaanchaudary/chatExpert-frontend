@@ -43,10 +43,13 @@ interface ChatCardProps {
   index: number;
   checkPress?: () => void;
   stylesConfig: ChatStyleConfig;
+  searchQuery?: string;
+  isCurrentMatch?: boolean;
+  isMatch?: boolean;
 }
 
 const ChatCard = forwardRef(
-  ({item, checkPress, index, stylesConfig}: ChatCardProps, ref: any) => {
+  ({item, checkPress, index, stylesConfig, searchQuery, isCurrentMatch, isMatch}: ChatCardProps, ref: any) => {
     const [checked, setChecked] = useState(item?.isCheck);
 
     useEffect(() => {
@@ -108,7 +111,13 @@ const ChatCard = forwardRef(
           ) : item.messageType === 'image' ? (
             <ImageMessage item={item} stylesConfig={stylesConfig} />
           ) : item.text ? (
-            <TextMessage item={item} stylesConfig={stylesConfig} />
+            <TextMessage 
+              item={item} 
+              stylesConfig={stylesConfig}
+              searchQuery={searchQuery}
+              isCurrentMatch={isCurrentMatch}
+              isMatch={isMatch}
+            />
           ) : null}
         </View>
       </View>

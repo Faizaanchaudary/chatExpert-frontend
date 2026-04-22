@@ -17,12 +17,18 @@ export function createChat(payload: {
   });
 }
 
-export function uploadChatMedia(chatId: string, formData: FormData) {
+export function uploadChatMedia(chatId: string, formData: FormData, onProgress?: (percent: number) => void) {
   return apiClient.post(`/chats/${chatId}/media`, formData, {
     headers: {
       'Content-Type': 'multipart/form-data',
     },
     maxBodyLength: Infinity,
+    onUploadProgress: (progressEvent) => {
+      if (onProgress && progressEvent.total) {
+        const percent = Math.round((progressEvent.loaded * 100) / progressEvent.total);
+        onProgress(percent);
+      }
+    },
   });
 }
 

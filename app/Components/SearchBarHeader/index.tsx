@@ -16,14 +16,21 @@ interface SearchBarProps {
   setSearchBarState?: any;
   value?: any;
   onChangeText?: any;
-  upWardDownWardBtn?: any;
   onFocus?: any;
+  onPressNext?: () => void;
+  onPressPrev?: () => void;
+  matchCount?: number;
+  currentMatch?: number;
 }
 const SearchBarHeader: React.FC<SearchBarProps> = ({
   setSearchBarState,
   value,
   onChangeText,
   onFocus,
+  onPressNext,
+  onPressPrev,
+  matchCount = 0,
+  currentMatch = 0,
 }) => {
   return (
     <View style={styles.inputContainer}>
@@ -41,14 +48,33 @@ const SearchBarHeader: React.FC<SearchBarProps> = ({
 
       {value ? (
         <>
-          <TouchableOpacity style={{marginRight: wp(2)}}>
+          {matchCount > 0 && (
+            <Text style={styles.matchCountText}>
+              {currentMatch}/{matchCount}
+            </Text>
+          )}
+          <TouchableOpacity 
+            style={{marginRight: wp(2)}}
+            onPress={onPressNext}
+            disabled={matchCount === 0}>
             <Image
               source={icn.downWardScrollBtn}
-              style={styles.upWardBtnStyle}
+              style={[
+                styles.upWardBtnStyle,
+                matchCount === 0 && styles.disabledButton
+              ]}
             />
           </TouchableOpacity>
-          <TouchableOpacity>
-            <Image source={icn.upWardScrollBtn} style={styles.upWardBtnStyle} />
+          <TouchableOpacity
+            onPress={onPressPrev}
+            disabled={matchCount === 0}>
+            <Image 
+              source={icn.upWardScrollBtn} 
+              style={[
+                styles.upWardBtnStyle,
+                matchCount === 0 && styles.disabledButton
+              ]} 
+            />
           </TouchableOpacity>
         </>
       ) : (

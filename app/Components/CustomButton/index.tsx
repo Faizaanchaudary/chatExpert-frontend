@@ -41,7 +41,10 @@ const CustomButton: React.FC<CustomButtonProps> = ({
       style={[styles.mainContainer, oddContainerStyle]}
     >
       {animating ? (
-        <ActivityIndicator />
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+          <ActivityIndicator />
+          {text ? <Text style={[styles.textStyle, oddTextStyle]}>{text}</Text> : null}
+        </View>
       ) : (
         <>
           {source && (

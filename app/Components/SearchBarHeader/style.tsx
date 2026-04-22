@@ -37,4 +37,13 @@ export const styles = StyleSheet.create({
     width: rwp(25),
     resizeMode: "contain",
   },
+  matchCountText: {
+    fontSize: rfs(12),
+    color: COLORS.textBlack,
+    fontFamily: fonts.POPPINS.Medium,
+    marginRight: wp(2),
+  },
+  disabledButton: {
+    opacity: 0.3,
+  },
 });

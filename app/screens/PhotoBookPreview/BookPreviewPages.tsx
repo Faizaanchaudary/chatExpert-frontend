@@ -3,9 +3,12 @@
  * Height-based pagination to match selected page dimensions. Text preserves newlines.
  */
 import React, { useMemo, useState, useRef, useCallback, useEffect } from 'react';
-import { View, Text, StyleSheet, Image } from 'react-native';
+import { View, Text, StyleSheet, Image, InteractionManager } from 'react-native';
 import { IMessage } from '../../interfaces/IMessage';
 import { ResolvedThemeConfig } from '../../themes/types';
+
+// Global height cache — persists across book switches, keyed by "msgId_containerWidth"
+const globalHeightCache: Record<string, number> = {};
 
 // Match PDF dimensions exactly - same as backend pdfService.js
 const PAGE_DIMENSIONS = {
@@ -361,6 +364,7 @@ interface BookPreviewPagesProps {
   resolvedConfig: ResolvedThemeConfig;
   containerWidth: number;
   format?: string; // 'square_14x14' or 'standard_14_8x21'
+  onPagesCalculated?: (pages: IMessage[][]) => void;
 }
 
 export const BookPreviewPages: React.FC<BookPreviewPagesProps> = ({
@@ -368,6 +372,7 @@ export const BookPreviewPages: React.FC<BookPreviewPagesProps> = ({
   resolvedConfig,
   containerWidth,
   format = 'standard_14_8x21',
+  onPagesCalculated,
 }) => {
   // Get exact dimensions based on format - matches PDF generation
   const dimensions = PAGE_DIMENSIONS[format as keyof typeof PAGE_DIMENSIONS] || PAGE_DIMENSIONS.standard_14_8x21;
@@ -378,7 +383,7 @@ export const BookPreviewPages: React.FC<BookPreviewPagesProps> = ({
 
   const colors = resolvedConfig.colors || {};
   const layout = resolvedConfig.layout || {};
-  const messageGap = 10;
+  const messageGap = 3;
   const dateFormat = layout.dateFormat || 'full';
   const showTime = dateFormat !== 'hidden';
   const showPageNumbers = layout.showPageNumbers !== false;
@@ -396,31 +401,106 @@ export const BookPreviewPages: React.FC<BookPreviewPagesProps> = ({
   const filteredMessages = useMemo(() => filterSystemMessages(messages), [messages]);
   const meName = useMemo(() => getMostFrequentSenderName(filteredMessages), [filteredMessages]);
 
+  console.log(`📊 BookPreviewPages: ${messages.length} messages → ${filteredMessages.length} after filtering`);
+  console.log(`📊 Container width: ${containerWidth}, Format: ${format}`);
+
   // ── Height-based pagination ──────────────────────────────────────────────
   const [msgHeights, setMsgHeights] = useState<Record<string, number>>({});
   const measuredRef = useRef<Record<string, number>>({});
   const pendingRef = useRef<number>(0);
   const [paginationReady, setPaginationReady] = useState(false);
+  const lastContainerWidthRef = useRef<number>(0);
+
+  const BATCH_SIZE = 150;
+  const [renderedUpTo, setRenderedUpTo] = useState(0);
+  const batchTimerRef = useRef<any>(null);
+  const renderedUpToRef = useRef(0);
+  useEffect(() => { renderedUpToRef.current = renderedUpTo; }, [renderedUpTo]);
 
   const messageKey = filteredMessages.map(m => String(m._id)).join(',');
   useEffect(() => {
-    if (containerWidth <= 0) return; // wait for valid layout width
-    measuredRef.current = {};
-    pendingRef.current = filteredMessages.length;
+    console.log(`🔄 Resetting measurement: containerWidth=${containerWidth}, messages=${filteredMessages.length}`);
+    if (containerWidth <= 0) return;
+
+    const widthDiff = Math.abs(containerWidth - lastContainerWidthRef.current);
+    if (lastContainerWidthRef.current > 0 && widthDiff < 1) {
+      console.log(`⏭️ Skipping re-measurement: width change too small (${widthDiff.toFixed(2)}px)`);
+      return;
+    }
+
+    lastContainerWidthRef.current = containerWidth;
+
+    // Check global cache — already measured messages don't need re-rendering
+    const cacheWidth = Math.round(containerWidth);
+    const preloaded: Record<string, number> = {};
+    const uncached: IMessage[] = [];
+    for (const msg of filteredMessages) {
+      const cacheKey = `${msg._id}_${cacheWidth}`;
+      if (globalHeightCache[cacheKey] !== undefined) {
+        preloaded[String(msg._id)] = globalHeightCache[cacheKey];
+      } else {
+        uncached.push(msg);
+      }
+    }
+
+    console.log(`📦 Cache hit: ${Object.keys(preloaded).length}/${filteredMessages.length} messages already measured`);
+
+    if (uncached.length === 0) {
+      console.log(`✅ All messages from cache, skipping measurement!`);
+      measuredRef.current = preloaded;
+      pendingRef.current = 0;
+      setMsgHeights(preloaded);
+      setPaginationReady(true);
+      setRenderedUpTo(0);
+      return;
+    }
+
+    measuredRef.current = { ...preloaded };
+    pendingRef.current = uncached.length;
     setMsgHeights({});
-    setPaginationReady(filteredMessages.length === 0);
+    setPaginationReady(false);
+
+    if (batchTimerRef.current) clearTimeout(batchTimerRef.current);
+    setRenderedUpTo(0);
+    InteractionManager.runAfterInteractions(() => {
+      setRenderedUpTo(Math.min(BATCH_SIZE, filteredMessages.length));
+    });
+    console.log(`🎬 Starting batched measurement of ${uncached.length} uncached messages (batch size: ${BATCH_SIZE})...`);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [messageKey, containerWidth]); // re-measure if containerWidth changes
+  }, [messageKey, containerWidth]);
 
   const onMsgLayout = useCallback((id: string, h: number) => {
     if (id in measuredRef.current) return;
     measuredRef.current[id] = h;
     pendingRef.current = Math.max(0, pendingRef.current - 1);
+
+    // Save to global cache so switching books never re-measures
+    const cacheKey = `${id}_${Math.round(lastContainerWidthRef.current)}`;
+    globalHeightCache[cacheKey] = h;
+
+    const measured = Object.keys(measuredRef.current).length;
+    if (measured % 100 === 0) {
+      console.log(`📏 Measured ${measured}/${filteredMessages.length} messages (${Math.round(measured / filteredMessages.length * 100)}%)`);
+    }
+
     if (pendingRef.current === 0) {
+      console.log(`✅ All ${filteredMessages.length} messages measured!`);
       setMsgHeights({ ...measuredRef.current });
       setPaginationReady(true);
+    } else {
+      const currentBatchEnd = renderedUpToRef.current;
+      const currentBatchMeasured = Object.keys(measuredRef.current).length;
+      if (currentBatchMeasured >= currentBatchEnd && currentBatchEnd < filteredMessages.length) {
+        const nextEnd = Math.min(currentBatchEnd + BATCH_SIZE, filteredMessages.length);
+        if (batchTimerRef.current) clearTimeout(batchTimerRef.current);
+        batchTimerRef.current = setTimeout(() => {
+          InteractionManager.runAfterInteractions(() => {
+            setRenderedUpTo(nextEnd);
+          });
+        }, 50);
+      }
     }
-  }, []);
+  }, [filteredMessages.length]);
   
   // Group consecutive images from same sender
   const groupConsecutiveImages = (msgs: IMessage[]): (IMessage | IMessage[])[] => {
@@ -603,11 +683,52 @@ export const BookPreviewPages: React.FC<BookPreviewPagesProps> = ({
   }, [paginationReady, msgHeights, filteredMessages, availableHeight, dateFormat, dateStyle, dateLanguage, imageLayout, containerWidth]);
   const totalPreviewPages = pages.length;
 
+  // Render pages in batches of 10 to avoid crashing when pages are ready
+  const PAGE_RENDER_BATCH = 10;
+  const [renderedPageCount, setRenderedPageCount] = useState(PAGE_RENDER_BATCH);
+  const pageRenderTimerRef = useRef<any>(null);
+
+  useEffect(() => {
+    if (!paginationReady || pages.length === 0) return;
+    setRenderedPageCount(PAGE_RENDER_BATCH);
+  }, [paginationReady, pages.length]);
+
+  useEffect(() => {
+    if (!paginationReady || renderedPageCount >= pages.length) return;
+    pageRenderTimerRef.current = setTimeout(() => {
+      setRenderedPageCount(prev => Math.min(prev + PAGE_RENDER_BATCH, pages.length));
+    }, 100);
+    return () => { if (pageRenderTimerRef.current) clearTimeout(pageRenderTimerRef.current); };
+  }, [renderedPageCount, paginationReady, pages.length]);
+
+  // Console log for page calculation comparison
+  React.useEffect(() => {
+    if (paginationReady && pages.length > 0) {
+      console.log(`📄 BookPreviewPages CALCULATED: ${pages.length} pages from ${filteredMessages.length} messages`);
+      console.log(`📄 Available height per page: ${availableHeight.toFixed(0)}px`);
+      console.log(`📄 Page dimensions: ${dimensions.width}x${dimensions.height}, scale: ${scale.toFixed(2)}`);
+      
+      // NEW: Calculate how many messages fit in 200 pages
+      if (pages.length > 200) {
+        let messagesIn200Pages = 0;
+        for (let i = 0; i < Math.min(200, pages.length); i++) {
+          messagesIn200Pages += pages[i].length;
+        }
+        console.log(`📊 SPLIT ANALYSIS: ${messagesIn200Pages} messages fit in first 200 pages (out of ${filteredMessages.length} total)`);
+        console.log(`📊 Ratio: ${(messagesIn200Pages / filteredMessages.length * 100).toFixed(1)}% of messages in first 200 pages`);
+      }
+
+      if (onPagesCalculated) {
+        onPagesCalculated(pages);
+      }
+    }
+  }, [pages.length, filteredMessages.length, paginationReady, availableHeight, dimensions, scale, onPagesCalculated]);
+
   return (
     <>
-    {/* Hidden measurement pass — renders all messages off-screen to capture heights */}
+    {/* Hidden measurement pass — renders messages in batches to avoid crashing */}
     <View pointerEvents="none" style={{ opacity: 0, position: 'absolute', top: 0, left: 0, width: containerWidth, zIndex: -1 }}>
-      {containerWidth > 0 && filteredMessages.map((msg) => {
+      {containerWidth > 0 && filteredMessages.slice(0, renderedUpTo).map((msg) => {
         const isImage = msg.messageType === 'image';
         const isVideoOrAudio = msg.messageType === 'video' || msg.messageType === 'audio';
         const rawMedia = (msg as any).url || (msg as any).localPath;
@@ -629,8 +750,8 @@ export const BookPreviewPages: React.FC<BookPreviewPagesProps> = ({
             {!isImage && !isVideoOrAudio && <Text style={{ fontWeight: '600', fontSize: fontSize - 1, marginBottom: 2 }}>{msg.senderName || ''}</Text>}
             {showText && !isVideoOrAudio && <Text style={{ fontSize, lineHeight: fontSize * lineHeight }}>{msg.text || ''}</Text>}
             {isImage && hasImageUri && <View style={{ width: 200, height: 200 }} />}
-            {isVideoOrAudio && (msg as any).qrUrl && (
-              <View style={{ width: 120, height: 120 + 16 + 20 + 4 }} />
+            {isVideoOrAudio && (
+              <View style={{ flexDirection: 'row', gap: 12, width: '100%', height: 120 + 16 + 20 + 4 }} />
             )}
             {showTime && <Text style={{ fontSize: fontSize - 2, marginTop: 4 }}>{msg.sendingTime || ''}</Text>}
           </View>
@@ -643,8 +764,10 @@ export const BookPreviewPages: React.FC<BookPreviewPagesProps> = ({
         let lastShownYear: string | null = null;
         let lastShownMonth: string | null = null;
         let globalMessageIndex = 0;
+        let lastSenderName: string | null = null; // Track sender across pages
+        let lastSenderSide: boolean | null = null; // Track sender side (true/false)
 
-        return pages.map((pageMessages, pageIndex) => {
+        return pages.slice(0, renderedPageCount).map((pageMessages, pageIndex) => {
           const pageElements: JSX.Element[] = [];
           
           // Check if we need year/month headers at start of this page.
@@ -684,6 +807,9 @@ export const BookPreviewPages: React.FC<BookPreviewPagesProps> = ({
                   </View>
                 );
                 lastShownYear = yearMonth.year;
+                // Reset sender tracking when year changes
+                lastSenderName = null;
+                lastSenderSide = null;
               }
               
               // Month header (if month changed)
@@ -713,6 +839,9 @@ export const BookPreviewPages: React.FC<BookPreviewPagesProps> = ({
                   </View>
                 );
                 lastShownMonth = yearMonth.month;
+                // Reset sender tracking when month changes
+                lastSenderName = null;
+                lastSenderSide = null;
               }
             }
 
@@ -729,6 +858,9 @@ export const BookPreviewPages: React.FC<BookPreviewPagesProps> = ({
                   </View>
                 );
                 lastShownDate = formattedDate;
+                // Reset sender tracking when date changes
+                lastSenderName = null;
+                lastSenderSide = null;
               }
             }
           }
@@ -760,7 +892,19 @@ export const BookPreviewPages: React.FC<BookPreviewPagesProps> = ({
                   </Text>
                 </View>
               );
+              // Reset sender tracking when date changes
+              lastSenderName = null;
+              lastSenderSide = null;
             }
+            
+            // Check if we should show sender name (WhatsApp-style grouping across pages)
+            const currentSenderName = msg.senderName;
+            const currentSenderSide = isMessageFromMe(msg.senderName || '', meName);
+            const showSenderName = lastSenderName !== currentSenderName || lastSenderSide !== currentSenderSide;
+            
+            // Update tracking for next message
+            lastSenderName = currentSenderName;
+            lastSenderSide = currentSenderSide;
             
             globalMessageIndex++;
             
@@ -790,7 +934,11 @@ export const BookPreviewPages: React.FC<BookPreviewPagesProps> = ({
             const isAudio = msg.messageType === 'audio';
             const rawMedia = (msg as any).url || (msg as any).localPath;
             let imageUri: string | undefined;
-            if (typeof rawMedia === 'string' && rawMedia.length > 0) {
+            
+            // For videos, use thumbnailUrl if available, otherwise fall back to video URL
+            if (isVideo && (msg as any).thumbnailUrl) {
+              imageUri = (msg as any).thumbnailUrl;
+            } else if (typeof rawMedia === 'string' && rawMedia.length > 0) {
               if (
                 rawMedia.startsWith('http://') ||
                 rawMedia.startsWith('https://') ||
@@ -805,7 +953,7 @@ export const BookPreviewPages: React.FC<BookPreviewPagesProps> = ({
             const showText = !isImage || !imageUri;
             const imageOnly = isImage && imageUri && !showText;
             const isMedia = msg.messageType === 'image' || msg.messageType === 'video';
-            const hideSenderName = isMedia;
+            const hideSenderName = isMedia || !showSenderName; // Hide if media OR if same sender as previous
 
             elements.push(
               <View
@@ -829,10 +977,10 @@ export const BookPreviewPages: React.FC<BookPreviewPagesProps> = ({
                         : isSender
                         ? colors.senderBubble || '#dcf8c6'
                         : colors.receiverBubble || '#ffffff',
-                      borderTopLeftRadius: 18,
-                      borderTopRightRadius: 18,
-                      borderBottomLeftRadius: isSender ? 18 : 4,
-                      borderBottomRightRadius: isSender ? 4 : 18,
+                      borderTopLeftRadius: 10,
+                      borderTopRightRadius: 10,
+                      borderBottomLeftRadius: isSender ? 10 : 2,
+                      borderBottomRightRadius: isSender ? 2 : 10,
                       borderWidth: 0,
                       borderColor: 'transparent',
                       shadowColor: 'rgba(0,0,0,0.08)',
@@ -841,8 +989,8 @@ export const BookPreviewPages: React.FC<BookPreviewPagesProps> = ({
                       shadowRadius: 2,
                       elevation: 1,
                       overflow: 'hidden',
-                      paddingHorizontal: imageOnly ? 0 : 14,
-                      paddingVertical: imageOnly ? 0 : 10,
+                      paddingHorizontal: imageOnly ? 0 : 10,
+                      paddingVertical: imageOnly ? 0 : 6,
                     },
                   ]}
                 >
@@ -884,31 +1032,62 @@ export const BookPreviewPages: React.FC<BookPreviewPagesProps> = ({
                       resizeMode="cover"
                     />
                   ) : null}
-                  {(isVideo || isAudio) && (msg as any).qrUrl ? (
+                  {(isVideo || isAudio) ? (
                     <View style={styles.qrContainer}>
-                      <Image
-                        source={{ uri: (msg as any).qrUrl }}
-                        style={styles.qrImage}
-                        resizeMode="contain"
-                      />
-                      <Text style={[styles.qrLabel, { fontSize: Math.max(8, fontSize - 2), color: isSender ? colors.senderText || '#000' : colors.receiverText || '#000' }]}>
-                        {isVideo ? 'Scan to watch video' : 'Scan to listen'}
-                      </Text>
+                      {isVideo ? (
+                        <View style={styles.videoThumbnailContainer}>
+                          {imageUri ? (
+                            <>
+                              <Image
+                                source={{ uri: imageUri }}
+                                style={styles.videoThumbnail}
+                                resizeMode="cover"
+                              />
+                              <View style={styles.playIconOverlay}>
+                                <Text style={styles.playIcon}>▶</Text>
+                              </View>
+                            </>
+                          ) : (
+                            <View style={[styles.videoThumbnail, { justifyContent: 'center', alignItems: 'center', backgroundColor: '#333' }]}>
+                              <Text style={styles.playIcon}>▶</Text>
+                            </View>
+                          )}
+                        </View>
+                      ) : null}
+                      <View style={styles.qrCodeSection}>
+                        {(msg as any).qrUrl ? (
+                          <Image
+                            source={{ uri: (msg as any).qrUrl }}
+                            style={styles.qrImage}
+                            resizeMode="contain"
+                          />
+                        ) : (
+                          <View style={[styles.qrImage, { justifyContent: 'center', alignItems: 'center', backgroundColor: '#f0f0f0', borderRadius: 8 }]}>
+                            <Text style={{ fontSize: 28 }}>{isAudio ? '🎵' : '🎬'}</Text>
+                            <Text style={{ fontSize: 9, color: '#999', marginTop: 4, textAlign: 'center' }}>QR pending</Text>
+                          </View>
+                        )}
+                        <Text style={[styles.qrLabel, { fontSize: Math.max(8, fontSize - 2), color: isSender ? colors.senderText || '#000' : colors.receiverText || '#000' }]}>
+                          {isVideo ? 'Scan to watch video' : 'Scan to listen'}
+                        </Text>
+                      </View>
                     </View>
                   ) : null}
                   {timeContent ? (
-                    <Text
-                      style={[
-                        styles.messageTime,
-                        {
-                          color: isSender ? colors.senderText : colors.receiverText,
-                          fontSize: fontSize - 2,
-                          textAlign: isSender ? 'right' : 'left',
-                        },
-                      ]}
-                    >
-                      {timeContent}
-                    </Text>
+                    <View style={styles.messageTimeRow}>
+                      <Text style={styles.messageTimeSpacer} />
+                      <Text
+                        style={[
+                          styles.messageTime,
+                          {
+                            color: isSender ? colors.senderText : colors.receiverText,
+                            fontSize: fontSize - 2,
+                          },
+                        ]}
+                      >
+                        {timeContent}
+                      </Text>
+                    </View>
                   ) : null}
                 </View>
               </View>
@@ -979,10 +1158,21 @@ const styles = StyleSheet.create({
   },
   messageText: {
     flexWrap: 'wrap',
+    paddingRight: 60, // Reserve space for inline time
+  },
+  messageTimeRow: {
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+    alignItems: 'flex-end',
+    marginTop: -20, // Pull time up to overlap with last line of text
+  },
+  messageTimeSpacer: {
+    flex: 1,
   },
   messageTime: {
     opacity: 0.7,
-    marginTop: 4,
+    paddingLeft: 8,
+    textAlign: 'right',
   },
   messageImage: {
     marginTop: 6,
@@ -998,8 +1188,41 @@ const styles = StyleSheet.create({
     borderRadius: 18,
   },
   qrContainer: {
+    flexDirection: 'row',
     alignItems: 'center',
     paddingVertical: 8,
+    gap: 12,
+  },
+  videoThumbnailContainer: {
+    position: 'relative',
+    width: 120,
+    height: 120,
+    borderRadius: 8,
+    overflow: 'hidden',
+    backgroundColor: '#e8e8e8',
+  },
+  videoThumbnail: {
+    width: '100%',
+    height: '100%',
+  },
+  playIconOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: 'rgba(0, 0, 0, 0.3)',
+  },
+  playIcon: {
+    fontSize: 32,
+    color: '#fff',
+  },
+  qrCodeSection: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    flex: 1,
   },
   qrImage: {
     width: 120,

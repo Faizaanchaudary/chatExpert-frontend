@@ -1203,12 +1203,47 @@ const PhotoBookPreview: React.FC<PhotoBookPreviewProps> = ({
           </View>
           <View style={styles.detailRow}>
             <Text style={styles.detailLabel}>Pages:</Text>
-            <Text style={styles.detailValue}>{pageCount ?? photoBook?.pageCount ?? 30}</Text>
+            <Text style={styles.detailValue}>
+              {(() => {
+                // Calculate TOTAL pages across ALL books
+                if (booksToUpload && booksToUpload.length > 0) {
+                  const totalPages = booksToUpload.reduce((sum, book) => sum + (book.actualPages || 0), 0);
+                  return totalPages;
+                } else if (photoBook?.books && photoBook.books.length > 0) {
+                  const totalPages = photoBook.books.reduce((sum, book) => sum + (book.estimatedPages || 0), 0);
+                  return totalPages;
+                }
+                return pageCount ?? photoBook?.pageCount ?? 30;
+              })()}
+            </Text>
           </View>
           <View style={styles.detailRow}>
             <Text style={styles.detailLabel}>Total Price:</Text>
             <Text style={styles.detailValue}>
-              ${(totalPrice ?? photoBook?.totalPrice ?? 0).toFixed(2)}
+              ${(() => {
+                // Calculate price for ALL books combined
+                const { calculateTotalPrice } = require('../../utils/pricingUtils');
+                const currentFormat = format || photoBook?.format || 'standard_14_8x21';
+                
+                if (booksToUpload && booksToUpload.length > 0) {
+                  const totalPrice = booksToUpload.reduce((sum, book) => {
+                    const bookPrice = calculateTotalPrice(currentFormat, book.actualPages || 30);
+                    return sum + bookPrice;
+                  }, 0);
+                  return totalPrice.toFixed(2);
+                } else if (photoBook?.books && photoBook.books.length > 0) {
+                  const totalPrice = photoBook.books.reduce((sum, book) => {
+                    const bookPrice = calculateTotalPrice(currentFormat, book.estimatedPages || 30);
+                    return sum + bookPrice;
+                  }, 0);
+                  return totalPrice.toFixed(2);
+                }
+                
+                // Single book fallback
+                const actualPageCount = pageCount ?? photoBook?.pageCount ?? 30;
+                const dynamicPrice = calculateTotalPrice(currentFormat, actualPageCount);
+                return dynamicPrice.toFixed(2);
+              })()}
             </Text>
           </View>
         </View>

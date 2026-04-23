@@ -96,7 +96,11 @@ const BookList: React.FC<BookListProps> = ({navigation, route}) => {
       const photoBooks = response.data?.data || [];
       console.log('📥 [BookList] Fetched photobooks:', photoBooks.length);
       console.log('📥 [BookList] PhotoBooks:', photoBooks);
-      setBackendPhotoBooks(photoBooks);
+      
+      // Filter to show only draft status books
+      const draftPhotoBooks = photoBooks.filter(book => book.status === 'draft');
+      console.log('📥 [BookList] Draft photobooks:', draftPhotoBooks.length);
+      setBackendPhotoBooks(draftPhotoBooks);
     } catch (error) {
       console.error('❌ [BookList] Error fetching photobooks:', error);
     } finally {

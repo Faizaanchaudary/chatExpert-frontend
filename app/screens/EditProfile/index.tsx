@@ -24,10 +24,10 @@ interface EditProfileProps {
   navigation?: any;
 }
 const EditProfile: React.FC<EditProfileProps> = ({ navigation }) => {
-  const [firstName, setFirstName] = useState("");
-  const [phoneNumber, setPhoneNumber] = useState("");
-  const [imageSource, setImageSource] = useState<any>(null);
   const user = useSelector((state: any) => state?.user?.user);
+  const [firstName, setFirstName] = useState(user?.fullName || "");
+  const [phoneNumber, setPhoneNumber] = useState(user?.phoneNumber || "");
+  const [imageSource, setImageSource] = useState<any>(null);
   const [loading, setLoading] = useState(false);
   const dispatch = useDispatch();
 
@@ -35,14 +35,25 @@ const EditProfile: React.FC<EditProfileProps> = ({ navigation }) => {
   /******  bcf36569-aca9-43cb-8a8c-a5f637ae4a63  *******/
   const update = async () => {
     try {
-      if (!firstName && !phoneNumber && !imageSource?.path) return;
+      // Check if any field has actually changed
+      const hasChanges = 
+        (firstName !== user?.fullName) || 
+        (phoneNumber !== user?.phoneNumber) || 
+        imageSource?.path;
+      
+      if (!hasChanges) {
+        Alert.alert("Info", "No changes to update");
+        return;
+      }
+      
       setLoading(true);
       const data = new FormData();
       data.append("userId", user?._id);
-      if (firstName) {
+      
+      if (firstName !== user?.fullName) {
         data?.append("fullName", firstName);
       }
-      if (phoneNumber) {
+      if (phoneNumber !== user?.phoneNumber) {
         data?.append("phoneNumber", phoneNumber);
       }
       if (imageSource?.path?.length > 0) {
@@ -59,7 +70,7 @@ const EditProfile: React.FC<EditProfileProps> = ({ navigation }) => {
         dispatch(onUpdate(obj));
         Alert.alert("Success", "Profile updated");
       } else {
-        Alert.alert("Failure", "Failed to login, please try again");
+        Alert.alert("Failure", "Failed to update profile, please try again");
       }
 
       // navigation.navigate("BottomTabNavigation", { screen: "Home" });
@@ -68,7 +79,7 @@ const EditProfile: React.FC<EditProfileProps> = ({ navigation }) => {
       if (err?.response?.data?.error) {
         Alert.alert("Failure", err?.response?.data?.error);
       } else {
-        Alert.alert("Failure", "Failed to login, please try again");
+        Alert.alert("Failure", "Failed to update profile, please try again");
       }
     } finally {
       setLoading(false);
@@ -125,12 +136,12 @@ const EditProfile: React.FC<EditProfileProps> = ({ navigation }) => {
           blurPlaceHolder={true}
         />
         <CustomInputField
-          placeHolder={user?.fullName ? user?.fullName : "Full Name *"}
+          placeHolder="Full Name *"
           value={firstName}
           onChangeText={(txt: any) => setFirstName(txt)}
         />
         <CustomInputField
-          placeHolder={user?.phoneNumber ? user?.phoneNumber : "Phone Number *"}
+          placeHolder="Phone Number *"
           value={phoneNumber}
           onChangeText={(txt: any) => setPhoneNumber(txt)}
           keyboardType={"numeric"}

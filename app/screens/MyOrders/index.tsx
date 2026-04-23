@@ -33,7 +33,7 @@ function mapOrderToCard(order: GelatoOrder & { photoBookId?: { totalPrice?: numb
   deliveryDate: string;
   orderId: string;
 } {
-  const orderId = order.orderReferenceId?.slice(-8) || order._id?.slice(-8) || "—";
+  const orderId = order.gelatoOrderId || order.orderReferenceId || order._id?.slice(-8) || "—";
   const price = order.photoBookId?.totalPrice != null
     ? `$${Number(order.photoBookId.totalPrice).toFixed(2)}`
     : "—";
@@ -56,9 +56,9 @@ function mapOrderToCard(order: GelatoOrder & { photoBookId?: { totalPrice?: numb
     price,
     photoBookSize: `Photo Book (${formatLabel})`,
     photoBookSize2: `Status: ${(order.fulfillmentStatus || "—").replace(/_/g, " ")}`,
-    addressLine: "See order details",
-    country: "—",
-    city: "—",
+    addressLine: order.fulfillmentStatus === "delivered" ? "Delivered" : order.fulfillmentStatus === "shipped" ? "In Transit" : "Processing",
+    country: "",
+    city: "",
     orderDate,
     deliveryDate,
     orderId: order._id,
@@ -73,7 +73,7 @@ const MyOrders: React.FC<MyOrdersProps> = ({ navigation, route }) => {
 
   const loadOrders = async () => {
     try {
-      const response = await getOrderHistory(1, 50);
+      const response = await getOrderHistory(1, 100); // Load more orders initially
       const list = response?.data?.data ?? [];
       setOrders(Array.isArray(list) ? list : []);
     } catch (e) {

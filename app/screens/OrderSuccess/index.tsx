@@ -30,7 +30,13 @@ const OrderSuccess: React.FC<OrderSuccessProps> = ({ navigation, route }) => {
           <Text style={styles.detailsTitle}>Order Details</Text>
           <View style={styles.detailRow}>
             <Text style={styles.detailLabel}>Order ID:</Text>
-            <Text style={styles.detailValue}>{orderId?.slice(-8) || 'N/A'}</Text>
+            <Text style={styles.detailValue}>{(orderId || 'N/A').slice(-8)}</Text>
+          </View>
+          <View style={styles.fullOrderIdRow}>
+            <Text style={styles.fullOrderIdLabel}>Full Order ID:</Text>
+            <Text style={styles.fullOrderIdValue} numberOfLines={2} ellipsizeMode="middle">
+              {orderId || 'N/A'}
+            </Text>
           </View>
           <Text style={styles.infoText}>
             You will receive an email confirmation shortly. You can track your order
@@ -112,6 +118,26 @@ const styles = StyleSheet.create({
     fontSize: rfs(16),
     fontFamily: fonts.POPPINS.SemiBold,
     color: COLORS.textBlack,
+  },
+  fullOrderIdRow: {
+    marginTop: hp(1),
+    paddingVertical: hp(1),
+  },
+  fullOrderIdLabel: {
+    fontSize: rfs(14),
+    fontFamily: fonts.POPPINS.Regular,
+    color: COLORS.textGray,
+    marginBottom: hp(0.5),
+  },
+  fullOrderIdValue: {
+    fontSize: rfs(12),
+    fontFamily: fonts.POPPINS.Regular,
+    color: COLORS.textBlack,
+    backgroundColor: COLORS.white,
+    padding: wp(2),
+    borderRadius: wp(1),
+    borderWidth: 1,
+    borderColor: COLORS.lightGray,
   },
   infoText: {
     fontSize: rfs(14),

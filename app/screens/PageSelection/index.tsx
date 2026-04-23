@@ -15,6 +15,7 @@ import { hp, wp, rfs } from '../../utils/reponsiveness';
 import fonts from '../../utils/fonts';
 import { createPhotoBook } from '../../services/photoBookApi';
 import { useSelector } from 'react-redux';
+import { getBasePrice, calculateTotalPrice } from '../../utils/pricingUtils';
 
 interface PageSelectionProps {
   navigation?: any;
@@ -24,29 +25,23 @@ interface PageSelectionProps {
 const PageSelection: React.FC<PageSelectionProps> = ({ navigation, route }) => {
   const { format, bookspecs, chatId, books } = route?.params || {};
   const [pageCount, setPageCount] = useState(30);
-  const [basePrice, setBasePrice] = useState(29.99);
-  const [totalPrice, setTotalPrice] = useState(29.99);
+  const [basePrice, setBasePrice] = useState(0);
+  const [totalPrice, setTotalPrice] = useState(0);
   const [loading, setLoading] = useState(false);
   const token = useSelector((state: any) => state?.user?.token);
 
   useEffect(() => {
-    // Set base price based on format
-    if (format === 'standard_14_8x21') {
-      setBasePrice(34.99);
-      setTotalPrice(34.99);
-    } else {
-      setBasePrice(29.99);
-      setTotalPrice(29.99);
-    }
+    // Set base price based on format using dynamic pricing
+    const dynamicBasePrice = getBasePrice(format, 30);
+    setBasePrice(dynamicBasePrice);
+    setTotalPrice(dynamicBasePrice);
   }, [format]);
 
   useEffect(() => {
-    // Calculate price when page count changes
-    const additionalPages = Math.max(0, pageCount - 30);
-    const pricePerPage = format === 'standard_14_8x21' ? 0.60 : 0.50;
-    const additionalPrice = additionalPages * pricePerPage;
-    setTotalPrice(basePrice + additionalPrice);
-  }, [pageCount, basePrice, format]);
+    // Calculate price when page count changes using dynamic pricing
+    const dynamicTotalPrice = calculateTotalPrice(format, pageCount);
+    setTotalPrice(dynamicTotalPrice);
+  }, [pageCount, format]);
 
   const handleContinue = async () => {
     if (!chatId) {
@@ -144,7 +139,7 @@ const PageSelection: React.FC<PageSelectionProps> = ({ navigation, route }) => {
               Additional Pages ({pageCount - 30}):
             </Text>
             <Text style={styles.priceValue}>
-              ${((pageCount - 30) * (format === 'standard_14_8x21' ? 0.60 : 0.50)).toFixed(2)}
+              ${(totalPrice - basePrice).toFixed(2)}
             </Text>
           </View>
         )}

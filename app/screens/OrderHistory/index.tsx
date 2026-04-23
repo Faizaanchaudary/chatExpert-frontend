@@ -23,26 +23,55 @@ const OrderHistory: React.FC<OrderHistoryProps> = ({ navigation }) => {
   const [orders, setOrders] = useState<GelatoOrder[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [hasMore, setHasMore] = useState(true);
+  const [page, setPage] = useState(1);
 
   useEffect(() => {
-    loadOrders();
+    loadOrders(1, true);
   }, []);
 
-  const loadOrders = async () => {
+  const loadOrders = async (pageNum: number = 1, reset: boolean = false) => {
     try {
-      const response = await getOrderHistory();
-      setOrders(response.data.data);
+      if (pageNum === 1) {
+        setLoading(true);
+      } else {
+        setLoadingMore(true);
+      }
+
+      const response = await getOrderHistory(pageNum, 10);
+      const newOrders = response.data.data;
+      const meta = response.data.meta;
+
+      if (reset) {
+        setOrders(newOrders);
+      } else {
+        setOrders(prev => [...prev, ...newOrders]);
+      }
+
+      // Check if there are more orders to load
+      setHasMore(newOrders.length === 10 && (meta?.total || 0) > pageNum * 10);
+      setPage(pageNum);
     } catch (error: any) {
       console.error('Failed to load orders:', error);
     } finally {
       setLoading(false);
       setRefreshing(false);
+      setLoadingMore(false);
     }
   };
 
   const onRefresh = () => {
     setRefreshing(true);
-    loadOrders();
+    setPage(1);
+    setHasMore(true);
+    loadOrders(1, true);
+  };
+
+  const loadMoreOrders = () => {
+    if (!loadingMore && hasMore) {
+      loadOrders(page + 1, false);
+    }
   };
 
   const getStatusColor = (status: string) => {
@@ -67,14 +96,16 @@ const OrderHistory: React.FC<OrderHistoryProps> = ({ navigation }) => {
 
   const renderOrderItem = ({ item }: { item: GelatoOrder }) => {
     return (
-      <TouchableOpacity
-        style={styles.orderCard}
-        onPress={() => navigation.navigate('OrderDetails', { orderId: item._id })}
-      >
+      <View style={styles.orderCard}>
         <View style={styles.orderHeader}>
-          <Text style={styles.orderId}>
-            Order #{item.orderReferenceId.slice(-8)}
-          </Text>
+          <View style={styles.orderIdContainer}>
+            <Text style={styles.orderId}>
+              Order #{(item.gelatoOrderId || item.orderReferenceId || 'N/A').slice(-8)}
+            </Text>
+            <Text style={styles.fullOrderId}>
+              {item.gelatoOrderId || item.orderReferenceId || 'N/A'}
+            </Text>
+          </View>
           <View
             style={[
               styles.statusBadge,
@@ -96,7 +127,7 @@ const OrderHistory: React.FC<OrderHistoryProps> = ({ navigation }) => {
             </Text>
           )}
         </View>
-      </TouchableOpacity>
+      </View>
     );
   };
 
@@ -121,6 +152,16 @@ const OrderHistory: React.FC<OrderHistoryProps> = ({ navigation }) => {
         contentContainerStyle={styles.listContent}
         refreshControl={
           <RefreshControl refreshing={refreshing} onRefresh={onRefresh} />
+        }
+        onEndReached={loadMoreOrders}
+        onEndReachedThreshold={0.1}
+        ListFooterComponent={
+          loadingMore ? (
+            <View style={styles.loadingMoreContainer}>
+              <ActivityIndicator size="small" color={COLORS.lightBlue} />
+              <Text style={styles.loadingMoreText}>Loading more orders...</Text>
+            </View>
+          ) : null
         }
         ListEmptyComponent={
           <View style={styles.emptyContainer}>
@@ -157,10 +198,20 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     marginBottom: hp(1),
   },
+  orderIdContainer: {
+    flex: 1,
+    marginRight: wp(2),
+  },
   orderId: {
     fontSize: rfs(18),
     fontFamily: fonts.POPPINS.Bold,
     color: COLORS.textBlack,
+  },
+  fullOrderId: {
+    fontSize: rfs(12),
+    fontFamily: fonts.POPPINS.Regular,
+    color: COLORS.textGray,
+    marginTop: hp(0.5),
   },
   statusBadge: {
     paddingHorizontal: wp(3),
@@ -196,6 +247,18 @@ const styles = StyleSheet.create({
     fontSize: rfs(18),
     fontFamily: fonts.POPPINS.Regular,
     color: COLORS.textGray,
+  },
+  loadingMoreContainer: {
+    flexDirection: 'row',
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingVertical: hp(2),
+  },
+  loadingMoreText: {
+    fontSize: rfs(14),
+    fontFamily: fonts.POPPINS.Regular,
+    color: COLORS.textGray,
+    marginLeft: wp(2),
   },
 });
 

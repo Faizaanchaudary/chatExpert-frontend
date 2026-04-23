@@ -99,14 +99,14 @@ const ProfileTab: React.FC<ProfileTabProps> = ({ navigation }) => {
       </View>
       <View style={styles.rateUsMainContainer}>
         <View style={styles.rateUsInnerContainer}>
-          <Text style={styles.rateUsTextStyle}>
+          {/* <Text style={styles.rateUsTextStyle}>
             Lorem Ipsum jeckson clibt clers mona
           </Text>
           <CustomButton
             text="Rate Us"
             oddContainerStyle={styles.rateUsOddContainer}
             oddTextStyle={styles.rateUsOddTextStyle}
-          />
+          /> */}
         </View>
         <LogoutModal
           visible={showLogOutModal}

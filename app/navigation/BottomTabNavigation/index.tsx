@@ -198,7 +198,6 @@ const BottomTabNavigation: React.FC<BottomTabNavigationProps> = ({
             tabPress: (e) => {
               // Check if we're already on the Profile screen
               const isOnProfileScreen = route?.state?.index === 0;
-              console.log("🚀 ~ isOnProfileScreen:", isOnProfileScreen);
 
               if (!isOnProfileScreen) {
                 // Reset the stack to show Profile screen

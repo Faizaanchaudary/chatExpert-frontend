@@ -401,9 +401,6 @@ export const BookPreviewPages: React.FC<BookPreviewPagesProps> = ({
   const filteredMessages = useMemo(() => filterSystemMessages(messages), [messages]);
   const meName = useMemo(() => getMostFrequentSenderName(filteredMessages), [filteredMessages]);
 
-  console.log(`📊 BookPreviewPages: ${messages.length} messages → ${filteredMessages.length} after filtering`);
-  console.log(`📊 Container width: ${containerWidth}, Format: ${format}`);
-
   // ── Height-based pagination ──────────────────────────────────────────────
   const [msgHeights, setMsgHeights] = useState<Record<string, number>>({});
   const measuredRef = useRef<Record<string, number>>({});
@@ -419,12 +416,10 @@ export const BookPreviewPages: React.FC<BookPreviewPagesProps> = ({
 
   const messageKey = filteredMessages.map(m => String(m._id)).join(',');
   useEffect(() => {
-    console.log(`🔄 Resetting measurement: containerWidth=${containerWidth}, messages=${filteredMessages.length}`);
     if (containerWidth <= 0) return;
 
     const widthDiff = Math.abs(containerWidth - lastContainerWidthRef.current);
     if (lastContainerWidthRef.current > 0 && widthDiff < 1) {
-      console.log(`⏭️ Skipping re-measurement: width change too small (${widthDiff.toFixed(2)}px)`);
       return;
     }
 
@@ -443,10 +438,8 @@ export const BookPreviewPages: React.FC<BookPreviewPagesProps> = ({
       }
     }
 
-    console.log(`📦 Cache hit: ${Object.keys(preloaded).length}/${filteredMessages.length} messages already measured`);
 
     if (uncached.length === 0) {
-      console.log(`✅ All messages from cache, skipping measurement!`);
       measuredRef.current = preloaded;
       pendingRef.current = 0;
       setMsgHeights(preloaded);
@@ -465,7 +458,6 @@ export const BookPreviewPages: React.FC<BookPreviewPagesProps> = ({
     InteractionManager.runAfterInteractions(() => {
       setRenderedUpTo(Math.min(BATCH_SIZE, filteredMessages.length));
     });
-    console.log(`🎬 Starting batched measurement of ${uncached.length} uncached messages (batch size: ${BATCH_SIZE})...`);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [messageKey, containerWidth]);
 
@@ -479,12 +471,8 @@ export const BookPreviewPages: React.FC<BookPreviewPagesProps> = ({
     globalHeightCache[cacheKey] = h;
 
     const measured = Object.keys(measuredRef.current).length;
-    if (measured % 100 === 0) {
-      console.log(`📏 Measured ${measured}/${filteredMessages.length} messages (${Math.round(measured / filteredMessages.length * 100)}%)`);
-    }
 
     if (pendingRef.current === 0) {
-      console.log(`✅ All ${filteredMessages.length} messages measured!`);
       setMsgHeights({ ...measuredRef.current });
       setPaginationReady(true);
     } else {
@@ -704,9 +692,6 @@ export const BookPreviewPages: React.FC<BookPreviewPagesProps> = ({
   // Console log for page calculation comparison
   React.useEffect(() => {
     if (paginationReady && pages.length > 0) {
-      console.log(`📄 BookPreviewPages CALCULATED: ${pages.length} pages from ${filteredMessages.length} messages`);
-      console.log(`📄 Available height per page: ${availableHeight.toFixed(0)}px`);
-      console.log(`📄 Page dimensions: ${dimensions.width}x${dimensions.height}, scale: ${scale.toFixed(2)}`);
       
       // NEW: Calculate how many messages fit in 200 pages
       if (pages.length > 200) {
@@ -714,8 +699,6 @@ export const BookPreviewPages: React.FC<BookPreviewPagesProps> = ({
         for (let i = 0; i < Math.min(200, pages.length); i++) {
           messagesIn200Pages += pages[i].length;
         }
-        console.log(`📊 SPLIT ANALYSIS: ${messagesIn200Pages} messages fit in first 200 pages (out of ${filteredMessages.length} total)`);
-        console.log(`📊 Ratio: ${(messagesIn200Pages / filteredMessages.length * 100).toFixed(1)}% of messages in first 200 pages`);
       }
 
       if (onPagesCalculated) {

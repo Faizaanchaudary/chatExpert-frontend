@@ -893,8 +893,6 @@ const Chat: React.FC<ChatProps> = ({ navigation }) => {
       const format = (route?.params as any)?.format || 'standard_14_8x21';
       
       // 🔥 NEW FLOW: Skip estimation, go directly to Preview for accurate calculation
-      console.log(`📚 NEW FLOW: Navigating to Preview for accurate page calculation`);
-      console.log(`📚 Total messages: ${checkedMessages.length}, format: ${format}`);
       
       // Save chat and messages to Redux for Preview to access
       const finalChat: IChat = {

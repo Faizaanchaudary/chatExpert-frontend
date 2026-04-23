@@ -41,12 +41,6 @@ apiClient.interceptors.request.use(async function (config: any) {
   const base = (config?.baseURL || "").replace(/\/+$/, "");
   const path = (config?.url || "").replace(/^\/+/, "");
   const fullUrl = path ? `${base}/${path}` : base;
-  console.log(
-    'apiConfig',
-    fullUrl,
-    config?.params ? config?.params : config?.data,
-    userInfo,
-  );
   return config;
 });
 apiClient.interceptors.response.use(
@@ -55,7 +49,6 @@ apiClient.interceptors.response.use(
   },
   (err: AxiosError) => {
     const status = err.response?.status || 500;
-    console.log('Failed with', status);
     switch (status) {
       case 401: {
         return Promise.reject(err);

@@ -71,12 +71,6 @@ const BookList: React.FC<BookListProps> = ({navigation, route}) => {
   const {currentChat, chatMessages} = useAppSelector(state => state.chats);
   const {savedChats} = useAppSelector(state => state.user);
 
-  console.log('📚 [BookList] Rendered');
-  console.log('📚 [BookList] uniqueId:', uniqueId);
-  console.log('📚 [BookList] photoBookFlow:', photoBookFlow);
-  console.log('📚 [BookList] savedChats count:', savedChats?.length);
-  console.log('📚 [BookList] savedChats:', savedChats);
-
   const [isLoadingDraft, setIsLoadingDraft] = useState(false);
   const [selectedChatId, setSelectedChatId] = useState<string | null>(
     uniqueId || null,
@@ -89,17 +83,13 @@ const BookList: React.FC<BookListProps> = ({navigation, route}) => {
 
   // NEW: Fetch photobooks from backend - refetch when screen comes into focus
   const fetchPhotoBooks = useCallback(async () => {
-    console.log('📥 [BookList] Fetching photobooks from backend...');
     setLoadingPhotoBooks(true);
     try {
       const response = await getUserPhotoBooks(1, 50);
       const photoBooks = response.data?.data || [];
-      console.log('📥 [BookList] Fetched photobooks:', photoBooks.length);
-      console.log('📥 [BookList] PhotoBooks:', photoBooks);
       
       // Filter to show only draft status books
       const draftPhotoBooks = photoBooks.filter(book => book.status === 'draft');
-      console.log('📥 [BookList] Draft photobooks:', draftPhotoBooks.length);
       setBackendPhotoBooks(draftPhotoBooks);
     } catch (error) {
       console.error('❌ [BookList] Error fetching photobooks:', error);
@@ -116,7 +106,6 @@ const BookList: React.FC<BookListProps> = ({navigation, route}) => {
   // Refetch when screen comes into focus (after uploading books)
   useFocusEffect(
     useCallback(() => {
-      console.log('🔄 [BookList] Screen focused, refetching photobooks...');
       fetchPhotoBooks();
     }, [fetchPhotoBooks])
   );
@@ -250,11 +239,6 @@ const BookList: React.FC<BookListProps> = ({navigation, route}) => {
 
   const showChatList = !selectedChatId && allBooks.length > 0;
 
-  console.log('📚 [BookList] showChatList:', showChatList);
-  console.log('📚 [BookList] selectedChatId:', selectedChatId);
-  console.log('📚 [BookList] allBooks count:', allBooks.length);
-  console.log('📚 [BookList] pages count:', pages.length);
-
   const handleScroll = (event: any) => {
     const offsetX = event.nativeEvent.contentOffset.x;
     const pageIndex = Math.round(offsetX / width);
@@ -292,7 +276,6 @@ const BookList: React.FC<BookListProps> = ({navigation, route}) => {
         onPress={() => {
           // Check if this is an existing photobook (from backend)
           if (item.photoBookId) {
-            console.log('📖 [BookList] Opening existing photobook:', item.photoBookId);
             navigation.navigate('PhotoBookPreview', {
               photoBookId: item.photoBookId,
               chatId: item.id,

@@ -50,7 +50,6 @@ const CartDetail: React.FC<CartDetailProps> = ({navigation}) => {
     setCartDetailData(updatedArr);
   };
   const addressCardOnPress = item => {
-    console.log('🚀 ~ addressCardOnPress of CartDEtail ~ item:', item);
     navigation.navigate('Addresses', {isProfileTab: false});
   };
   return (

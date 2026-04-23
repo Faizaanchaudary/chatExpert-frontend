@@ -96,7 +96,6 @@ export const TitleEditorModal: React.FC<TitleEditorModalProps> = ({
   });
 
   const handleTextChange = (type: 'years' | 'months', key: string, text: string) => {
-    console.log('✏️ Text changed:', { type, key, text });
     setEditedTitles((prev) => ({
       ...prev,
       [type]: {
@@ -139,7 +138,6 @@ export const TitleEditorModal: React.FC<TitleEditorModalProps> = ({
   };
 
   const handleSave = () => {
-    console.log('💾 Saving titles:', JSON.stringify(editedTitles, null, 2));
     onSave(editedTitles);
     onClose();
   };

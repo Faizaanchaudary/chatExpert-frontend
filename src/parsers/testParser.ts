@@ -38,7 +38,6 @@ function runTest1_basicOrder() {
   assertEqual(messages[0].id, 'wa-0', 'Test1: msg1 id deterministic');
   assertEqual(messages[3].id, 'wa-3', 'Test1: msg4 id deterministic');
 
-  console.log('✅ Test 1 passed');
 }
 
 function runTest2_multiline() {
@@ -57,7 +56,6 @@ function runTest2_multiline() {
     'Test2: multiline append should preserve newlines',
   );
   assertEqual(messages[1].text, 'OK', 'Test2: second message text');
-  console.log('✅ Test 2 passed');
 }
 
 function runTest3_stress1000() {
@@ -81,7 +79,6 @@ function runTest3_stress1000() {
     assertEqual(messages[i].id, `wa-${i}`, 'Test3: deterministic IDs preserve order');
   }
 
-  console.log(`✅ Test 3 passed (1000 messages) in ${t1 - t0}ms`);
 }
 
 function runTest4_dashFormat() {
@@ -101,7 +98,6 @@ function runTest4_dashFormat() {
   assert(!!messages[1].mediaUri, 'Test4: msg2 media linked');
   assertEqual(mediaLinked, 1, 'Test4: mediaLinked should be 1');
   assertEqual(messages[2].sender, 'A', 'Test4: msg3 sender');
-  console.log('✅ Test 4 passed (dash format)');
 }
 
 /**
@@ -118,7 +114,5 @@ export function runWhatsappParserTests() {
   const example = '[12/05/24, 10:22] A: IMG-1234.jpg (file attached)';
   const map = buildMediaFilesMap([{ name: 'IMG-1234.jpg', path: '/x/IMG-1234.jpg' }]);
   const detailed = parseWhatsAppChatTextDetailed(example, map);
-  console.log('Messages parsed:', detailed.messages.length);
-  console.log('Media linked:', detailed.mediaLinked);
 }
 

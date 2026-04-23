@@ -27,23 +27,16 @@ const DraftTab: React.FC<DraftTabProps> = ({navigation}) => {
   const [backendPhotoBooks, setBackendPhotoBooks] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
   
-  console.log('📝 [DraftTab] Rendered');
-  console.log('📝 [DraftTab] savedChats:', savedChats);
-  console.log('📝 [DraftTab] savedChats count:', savedChats?.length);
   
   // Fetch photobooks from backend - refetch when screen comes into focus
   const fetchPhotoBooks = useCallback(async () => {
-    console.log('📥 [DraftTab] Fetching photobooks from backend...');
     setLoading(true);
     try {
       const response = await getUserPhotoBooks(1, 50);
       const photoBooks = response.data?.data || [];
-      console.log('📥 [DraftTab] Fetched photobooks:', photoBooks.length);
-      console.log('📥 [DraftTab] PhotoBooks:', photoBooks);
       
       // Filter only draft status
       const drafts = photoBooks.filter((pb: any) => pb.status === 'draft');
-      console.log('📥 [DraftTab] Draft photobooks:', drafts.length);
       setBackendPhotoBooks(drafts);
     } catch (error) {
       console.error('❌ [DraftTab] Error fetching photobooks:', error);
@@ -60,20 +53,17 @@ const DraftTab: React.FC<DraftTabProps> = ({navigation}) => {
   // Refetch when screen comes into focus (after uploading books)
   useFocusEffect(
     useCallback(() => {
-      console.log('🔄 [DraftTab] Screen focused, refetching photobooks...');
       fetchPhotoBooks();
     }, [fetchPhotoBooks])
   );
   
   // console.log("Savedss", savedChats[3]?.chat[0][0]?.bookSpecs);
   useEffect(() => {
-    console.log('📝 [DraftTab] useEffect triggered');
     
     const allDrafts: DraftItem[] = [];
     
     // Add savedChats (local drafts)
     if (savedChats && savedChats.length > 0) {
-      console.log('📝 [DraftTab] Processing savedChats...');
       // Transform saved chats to match DraftCard format
       const formattedChats = savedChats.map((chat: any) => {
         // Safely extract bookSpecs - handle different chat structures
@@ -147,7 +137,6 @@ const DraftTab: React.FC<DraftTabProps> = ({navigation}) => {
       });
 
       setDraftCardData(sortedChats);
-      console.log('📝 [DraftTab] Draft cards set:', sortedChats.length);
   }, [savedChats, backendPhotoBooks]);
 
   return (
@@ -186,11 +175,9 @@ const DraftTab: React.FC<DraftTabProps> = ({navigation}) => {
               item={item}
               onDeleted={fetchPhotoBooks}
               continuePress={() => {
-                console.log('📖 [DraftTab] Opening draft:', item);
                 
                 // If this draft has a photoBookId, navigate directly to preview
                 if (item?.photoBookId) {
-                  console.log('📖 [DraftTab] Opening existing photobook:', item.photoBookId);
                   navigation.navigate('PhotoBookPreview', {
                     photoBookId: item.photoBookId,
                     chatId: item?.id,

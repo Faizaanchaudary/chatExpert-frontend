@@ -12,7 +12,6 @@ export async function copyContentUriToFile(
     const res = await RNFS.copyFile(contentUri, destPath);
     return destPath;
   }
-  console.log('ContentURI>>', contentUri);
 
   return contentUri; // already a file path
 }

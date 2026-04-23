@@ -13,7 +13,6 @@ const AddressCard: React.FC<AddressCardProps> = ({
   cardOnPress,
   showNoDel,
 }) => {
-  console.log("item", item);
   return (
     <TouchableOpacity style={styles.mainContainer} onPress={cardOnPress}>
       <View style={styles.textContainerStyle}>

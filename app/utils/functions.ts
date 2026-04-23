@@ -34,7 +34,6 @@ const selectAndUploadImages = async (startId: number, item: any) => {
       { mediaType: "photo", selectionLimit: 0 }, // Allows multiple image selection
       async (response) => {
         if (response.didCancel || response.errorCode) {
-          console.log("User cancelled image picker or an error occurred");
           resolve([]);
           return;
         }

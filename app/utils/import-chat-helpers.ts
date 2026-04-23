@@ -164,7 +164,6 @@ export const processChatFile = async (
         continue;
       }
       if (fullMessage?.toUpperCase().includes('is a contact'.toUpperCase())) {
-        console.log('Contains omitted media');
         continue;
       }
 
@@ -214,8 +213,6 @@ export const processChatFile = async (
           }
         }
 
-        console.log('Trying to find attachment with name:', attachmentFileName);
-
         // If we found a filename, look for it in the extracted files
         if (attachmentFileName) {
           // First try exact match
@@ -244,7 +241,6 @@ export const processChatFile = async (
 
           if (attachmentFile) {
             let attachmentPath = attachmentFile.path;
-            console.log('Found Attachment File', attachmentFile);
 
             // API call to upload the file
             const res = await upload(
@@ -284,8 +280,7 @@ export const processChatFile = async (
 
             continue;
           } else {
-            console.log('Could not find attachment file:', attachmentFileName);
-          }
+            continue;
         }
       }
       const encryptedText = 'end-to-end encrypted';
@@ -329,7 +324,6 @@ export const processChatFile = async (
       }
 
       if (item?.sender?.trim()?.toUpperCase().includes('added'.toUpperCase())) {
-        console.log('Console==>', item?.sender, ' -- ', item?.message);
         continue;
       }
 
@@ -391,7 +385,6 @@ export const getSender = async (messages: WhatsAppMessage[]) => {
   // Define the mapper function
   const mapper = async (item: WhatsAppMessage) => {
     if (item?.message.includes('created group')) {
-      console.log('Contains created group');
       return;
     }
     const encryptedText = 'end-to-end encrypted';

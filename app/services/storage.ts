@@ -21,7 +21,6 @@ export async function uploadToFirebase(
   const ref = storage().ref(storagePath);
   await ref.putFile(localPath); // note: `putFile` for RN local paths
   const url = await ref.getDownloadURL();
-  console.log('URL', url);
 
   return url;
 }

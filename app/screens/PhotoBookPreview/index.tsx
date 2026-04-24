@@ -387,9 +387,21 @@ const PhotoBookPreview: React.FC<PhotoBookPreviewProps> = ({
   const pdfGenerated = React.useMemo(() => {
     if (generatingPdf) return true; // Switch UI immediately when generation starts
     if (photoBook?.books && photoBook.books.length > 0) {
-      return photoBook.books.some((b: any) => b.generatedPdfUrl);
+      const hasPdf = photoBook.books.some((b: any) => b.generatedPdfUrl);
+      console.log('📄 [pdfGenerated] Multi-book PDF check:', {
+        hasPdf,
+        booksWithPdf: photoBook.books.filter((b: any) => b.generatedPdfUrl).length,
+        totalBooks: photoBook.books.length,
+        photoBookStatus: photoBook.status,
+      });
+      return hasPdf;
     }
-    return !!photoBook?.generatedPdfUrl;
+    const hasPdf = !!photoBook?.generatedPdfUrl;
+    console.log('📄 [pdfGenerated] Single-book PDF check:', {
+      hasPdf,
+      photoBookStatus: photoBook?.status,
+    });
+    return hasPdf;
   }, [photoBook, generatingPdf]);
 
   // NEW: Filter messages for current book
@@ -439,6 +451,17 @@ const PhotoBookPreview: React.FC<PhotoBookPreviewProps> = ({
       const response = await getPhotoBookById(photoBookId);
       const data = response.data?.data ?? response.data;
       
+      // Log book status when loaded
+      console.log('📖 [PhotoBookPreview] Book loaded - Status:', {
+        photoBookId: data?._id,
+        status: data?.status,
+        format: data?.format,
+        isMultiBook: (data?.books?.length || 0) > 0,
+        booksCount: data?.books?.length || 1,
+        hasMessages: data?.chatId?.totalMessages > 0,
+        totalMessages: data?.chatId?.totalMessages || 0,
+      });
+      
       setPhotoBook(data);
       if (data?.theme_config) {
         dispatch(
@@ -455,7 +478,7 @@ const PhotoBookPreview: React.FC<PhotoBookPreviewProps> = ({
         setPreviewUrl(data.previewUrl);
       }
     } catch (e) {
-      console.error('❌ [loadPhotoBook] Error:', e);
+      console.error('❌ [loadPhotoBook] Error:', e.message);
       Alert.alert('Error', 'Failed to load photo book');
     }
   }, [photoBookId, dispatch]);
@@ -496,7 +519,7 @@ const PhotoBookPreview: React.FC<PhotoBookPreviewProps> = ({
       );
       setMessages(filterSystemMessages(arr));
     } catch (error) {
-      console.error('❌ [loadMessages] Error:', error);
+      console.error('❌ [loadMessages] Error:', error.message);
       setMessages([]);
     }
   }, [chatId, photoBook, reduxChatId, reduxMessages, needsCalculation]);
@@ -524,13 +547,14 @@ const PhotoBookPreview: React.FC<PhotoBookPreviewProps> = ({
           getAllMessagesByChat(cid)
             .then((arr) => {
               if (arr.length === 0) {
+                console.warn('⚠️ [PhotoBookPreview] No messages found for draft chat:', cid);
                 setMessages([]);
               } else {
                 setMessages(filterSystemMessages(arr));
               }
             })
             .catch((error) => {
-              console.error('❌ [useEffect] Error fetching messages:', error);
+              console.error('❌ [PhotoBookPreview] Error fetching messages:', error.message);
               setMessages([]);
             });
           return;
@@ -552,7 +576,7 @@ const PhotoBookPreview: React.FC<PhotoBookPreviewProps> = ({
             setMessages(filterSystemMessages(arr));
           })
           .catch((error) => {
-            console.error('❌ [useEffect] Error fetching messages:', error);
+            console.error('❌ [PhotoBookPreview] Error fetching messages:', error.message);
             setMessages([]);
           });
       }

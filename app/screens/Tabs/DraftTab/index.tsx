@@ -37,7 +37,32 @@ const DraftTab: React.FC<DraftTabProps> = ({navigation}) => {
       
       // Filter only draft status
       const drafts = photoBooks.filter((pb: any) => pb.status === 'draft');
-      setBackendPhotoBooks(drafts);
+      
+      // Filter out drafts with 0 messages (broken/incomplete uploads)
+      const draftsWithMessages = drafts.filter((pb: any) => {
+        // Check if it's a multi-book photobook
+        if (pb.books && Array.isArray(pb.books) && pb.books.length > 0) {
+          // For multi-book: check if any book has messages
+          const totalMessagesInBooks = pb.books.reduce((sum: number, book: any) => {
+            return sum + (book.messageCount || 0);
+          }, 0);
+          
+          if (totalMessagesInBooks === 0) {
+            console.warn('⚠️ [DraftTab] Filtering out empty multi-book draft:', pb._id);
+            return false;
+          }
+        } else {
+          // For single book: check chatId.totalMessages
+          const totalMessages = pb.chatId?.totalMessages || 0;
+          if (totalMessages === 0) {
+            console.warn('⚠️ [DraftTab] Filtering out empty single-book draft:', pb._id);
+            return false;
+          }
+        }
+        return true;
+      });
+      
+      setBackendPhotoBooks(draftsWithMessages);
     } catch (error) {
       console.error('❌ [DraftTab] Error fetching photobooks:', error);
     } finally {
@@ -175,6 +200,20 @@ const DraftTab: React.FC<DraftTabProps> = ({navigation}) => {
               item={item}
               onDeleted={fetchPhotoBooks}
               continuePress={() => {
+                // Log book status when opened
+                if (item?.photoBookId) {
+                  console.log('📖 [DraftTab] Opening draft with photoBookId:', {
+                    photoBookId: item.photoBookId,
+                    chatId: item?.id,
+                    format: item?.bookSpecs?.format || 'standard_14_8x21',
+                    hasBookSpecs: !!item?.bookSpecs,
+                  });
+                } else {
+                  console.log('📖 [DraftTab] Opening local draft (no photoBookId):', {
+                    chatId: item?.id,
+                    format: item?.bookSpecs?.format || 'standard_14_8x21',
+                  });
+                }
                 
                 // If this draft has a photoBookId, navigate directly to preview
                 if (item?.photoBookId) {

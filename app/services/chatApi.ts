@@ -55,20 +55,30 @@ export async function getAllMessagesByChat(chatId: string): Promise<IMessage[]> 
   let page = 1;
   let allMessages: IMessage[] = [];
 
-  while (true) {
-    const response = await apiClient.get(`/messages/${chatId}`, {
-      params: { page, limit: PAGE_SIZE },
-    });
-    const data = response.data?.data ?? response.data;
-    const arr: IMessage[] = Array.isArray(data) ? data : [];
-    allMessages = allMessages.concat(arr);
+  try {
+    while (true) {
+      const response = await apiClient.get(`/messages/${chatId}`, {
+        params: { page, limit: PAGE_SIZE },
+      });
+      
+      const data = response.data?.data ?? response.data;
+      const arr: IMessage[] = Array.isArray(data) ? data : [];
+      
+      allMessages = allMessages.concat(arr);
 
-    const total: number = response.data?.meta?.total ?? 0;
-    if (allMessages.length >= total || arr.length < PAGE_SIZE) break;
-    page++;
+      const total: number = response.data?.meta?.total ?? 0;
+      
+      if (allMessages.length >= total || arr.length < PAGE_SIZE) {
+        break;
+      }
+      page++;
+    }
+
+    return allMessages;
+  } catch (error: any) {
+    console.error('❌ [getAllMessagesByChat] Error:', error.message);
+    throw error;
   }
-
-  return allMessages;
 }
 
 export function bulkMessages(

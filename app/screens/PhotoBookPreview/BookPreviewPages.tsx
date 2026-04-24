@@ -7,7 +7,7 @@ import { View, Text, StyleSheet, Image, InteractionManager, ActivityIndicator } 
 import { IMessage } from '../../interfaces/IMessage';
 import { ResolvedThemeConfig } from '../../themes/types';
 
-// Global height cache — persists across book switches, keyed by "msgId_containerWidth"
+// Global height cache — persists across book switches, keyed by "msgId_containerWidth_[withName|noName]"
 const globalHeightCache: Record<string, number> = {};
 
 // Match PDF dimensions exactly - same as backend pdfService.js
@@ -18,12 +18,14 @@ const PAGE_DIMENSIONS = {
   },
   standard_14_8x21: {
     width: 560,
-    height: 820,
+    height: 820, // preview height — slightly taller than PDF (794) for better visual spacing
   },
 };
 
-// Overhead: paddingVertical*2 (32) + page number area (~24)
-const PAGE_OVERHEAD = 56;
+// Overhead: page paddingVertical*2 (16*2=32) + bottom safety buffer (16).
+// The buffer covers: last message marginBottom (3), page number area at bottom:8,
+// and a small cushion so the last bubble never visually touches the bottom edge.
+const PAGE_OVERHEAD = 48;
 
 /** System message filter - same as backend PDF generation */
 const SYSTEM_SENDER_NAMES = ['system', 'whatsapp', 'notification'];
@@ -401,9 +403,9 @@ export const BookPreviewPages: React.FC<BookPreviewPagesProps> = ({
   const filteredMessages = useMemo(() => filterSystemMessages(messages), [messages]);
   const meName = useMemo(() => getMostFrequentSenderName(filteredMessages), [filteredMessages]);
 
-  // ── Height-based pagination ──────────────────────────────────────────────
-  const [msgHeights, setMsgHeights] = useState<Record<string, number>>({});
-  const measuredRef = useRef<Record<string, number>>({});
+  // msgHeights stores { withName, noName } for each message id
+  const [msgHeights, setMsgHeights] = useState<Record<string, { withName: number; noName: number }>>({});
+  const measuredRef = useRef<Record<string, { withName: number; noName: number }>>({});
   const pendingRef = useRef<number>(0);
   const [paginationReady, setPaginationReady] = useState(false);
   const lastContainerWidthRef = useRef<number>(0);
@@ -427,12 +429,16 @@ export const BookPreviewPages: React.FC<BookPreviewPagesProps> = ({
 
     // Check global cache — already measured messages don't need re-rendering
     const cacheWidth = Math.round(containerWidth);
-    const preloaded: Record<string, number> = {};
+    const preloaded: Record<string, { withName: number; noName: number }> = {};
     const uncached: IMessage[] = [];
     for (const msg of filteredMessages) {
-      const cacheKey = `${msg._id}_${cacheWidth}`;
-      if (globalHeightCache[cacheKey] !== undefined) {
-        preloaded[String(msg._id)] = globalHeightCache[cacheKey];
+      const cacheKeyWith = `${msg._id}_${cacheWidth}_withName`;
+      const cacheKeyNo   = `${msg._id}_${cacheWidth}_noName`;
+      if (globalHeightCache[cacheKeyWith] !== undefined && globalHeightCache[cacheKeyNo] !== undefined) {
+        preloaded[String(msg._id)] = {
+          withName: globalHeightCache[cacheKeyWith],
+          noName:   globalHeightCache[cacheKeyNo],
+        };
       } else {
         uncached.push(msg);
       }
@@ -461,16 +467,15 @@ export const BookPreviewPages: React.FC<BookPreviewPagesProps> = ({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [messageKey, containerWidth]);
 
-  const onMsgLayout = useCallback((id: string, h: number) => {
+  const onMsgLayout = useCallback((id: string, hWith: number, hNo: number) => {
     if (id in measuredRef.current) return;
-    measuredRef.current[id] = h;
+    measuredRef.current[id] = { withName: hWith, noName: hNo };
     pendingRef.current = Math.max(0, pendingRef.current - 1);
 
     // Save to global cache so switching books never re-measures
-    const cacheKey = `${id}_${Math.round(lastContainerWidthRef.current)}`;
-    globalHeightCache[cacheKey] = h;
-
-    const measured = Object.keys(measuredRef.current).length;
+    const cacheWidth = Math.round(lastContainerWidthRef.current);
+    globalHeightCache[`${id}_${cacheWidth}_withName`] = hWith;
+    globalHeightCache[`${id}_${cacheWidth}_noName`]   = hNo;
 
     if (pendingRef.current === 0) {
       setMsgHeights({ ...measuredRef.current });
@@ -571,6 +576,10 @@ export const BookPreviewPages: React.FC<BookPreviewPagesProps> = ({
     let lastYear: string | null = null;
     let lastMonth: string | null = null;
     let lastDate: string | null = null;
+    // Track sender across pagination — mirrors render pass so we know which
+    // messages actually show the sender name (and which have it hidden).
+    let paginationLastSenderName: string | null = null;
+    let paginationLastSenderSide: boolean | null = null;
 
     // For grid layout: pre-group consecutive images so pagination uses grid heights
     // (smaller than full-page image height), allowing multiple images per page.
@@ -598,7 +607,8 @@ export const BookPreviewPages: React.FC<BookPreviewPagesProps> = ({
       items = [];
       for (const item of grouped) {
         if (!Array.isArray(item)) {
-          items.push({ messages: [item], height: msgHeights[String(item._id)] ?? 65 });
+          const heights = msgHeights[String(item._id)];
+          items.push({ messages: [item], height: heights ? heights.withName : 65 });
           continue;
         }
         // Split large groups into chunks that fit within one page
@@ -609,25 +619,64 @@ export const BookPreviewPages: React.FC<BookPreviewPagesProps> = ({
         }
       }
     } else {
-      items = filteredMessages.map(msg => ({
-        messages: [msg],
-        height: msgHeights[String(msg._id)] ?? 65,
-      }));
+      // For non-grid layout, pick withName or noName height based on sender tracking
+      let pItemLastSenderName: string | null = null;
+      let pItemLastSenderSide: boolean | null = null;
+      items = filteredMessages.map(msg => {
+        const isMedia = msg.messageType === 'image' || msg.messageType === 'video';
+        const senderName = msg.senderName || null;
+        const senderSide = isMessageFromMe(msg.senderName || '', meName);
+        const nameWillShow =
+          !isMedia &&
+          (pItemLastSenderName !== senderName || pItemLastSenderSide !== senderSide);
+        pItemLastSenderName = senderName;
+        pItemLastSenderSide = senderSide;
+
+        const heights = msgHeights[String(msg._id)];
+        const h = heights
+          ? (nameWillShow ? heights.withName : heights.noName)
+          : 65;
+        return { messages: [msg], height: h };
+      });
     }
 
     for (const item of items) {
       const firstMsg = item.messages[0];
-      const rawMsgH = item.height;
+      let rawMsgH = item.height;
       let headerH = 0;
+
+      // ── Sender-name correction ──────────────────────────────────────────
+      // When a date/year/month header fires, the render pass resets lastSender
+      // so the first message after a header always shows the name.
+      // Mirror that same reset here so the correct height variant is used.
 
       if (dateFormat === 'full') {
         const msgDateStr = firstMsg.date || firstMsg.sendingTime || '';
         const ym = getYearMonth(msgDateStr);
         const formattedDate = formatDate(msgDateStr, dateStyle, dateLanguage);
-        if (ym && ym.year !== lastYear) headerH += 68;
-        if (ym && ym.month !== lastMonth) headerH += 48;
-        if (formattedDate && formattedDate !== lastDate) headerH += 44;
+        if (ym && ym.year !== lastYear) {
+          headerH += 68;
+          // Year header resets sender tracking in render pass
+          paginationLastSenderName = null;
+          paginationLastSenderSide = null;
+        }
+        if (ym && ym.month !== lastMonth) {
+          headerH += 48;
+          paginationLastSenderName = null;
+          paginationLastSenderSide = null;
+        }
+        if (formattedDate && formattedDate !== lastDate) {
+          headerH += 44;
+          paginationLastSenderName = null;
+          paginationLastSenderSide = null;
+        }
       }
+
+      // Update pagination sender tracking
+      const itemSenderName = firstMsg.senderName || null;
+      const itemSenderSide = isMessageFromMe(firstMsg.senderName || '', meName);
+      paginationLastSenderName = itemSenderName;
+      paginationLastSenderSide = itemSenderSide;
 
       const totalH = rawMsgH + headerH;
 
@@ -668,7 +717,7 @@ export const BookPreviewPages: React.FC<BookPreviewPagesProps> = ({
 
     if (currentPage.length > 0) result.push(currentPage);
     return result.length > 0 ? result : (filteredMessages.length > 0 ? [filteredMessages] : []);
-  }, [paginationReady, msgHeights, filteredMessages, availableHeight, dateFormat, dateStyle, dateLanguage, imageLayout, containerWidth]);
+  }, [paginationReady, msgHeights, filteredMessages, availableHeight, dateFormat, dateStyle, dateLanguage, imageLayout, containerWidth, meName, lineHeight, fontSize]);
   const totalPreviewPages = pages.length;
 
   // Render pages in batches of 10 to avoid crashing when pages are ready
@@ -709,37 +758,110 @@ export const BookPreviewPages: React.FC<BookPreviewPagesProps> = ({
 
   return (
     <>
-    {/* Hidden measurement pass — renders messages in batches to avoid crashing */}
+    {/* Hidden measurement pass — pixel-perfect clone of the actual bubble render.
+        Each message is measured TWICE: once with sender name, once without.
+        The pagination loop picks the correct height based on actual visibility. */}
     <View pointerEvents="none" style={{ opacity: 0, position: 'absolute', top: 0, left: 0, width: containerWidth, zIndex: -1 }}>
-      {containerWidth > 0 && filteredMessages.slice(0, renderedUpTo).map((msg) => {
-        const isImage = msg.messageType === 'image';
-        const isVideoOrAudio = msg.messageType === 'video' || msg.messageType === 'audio';
-        const rawMedia = (msg as any).url || (msg as any).localPath;
-        const hasImageUri = typeof rawMedia === 'string' && rawMedia.length > 0;
-        const showText = !isImage || !hasImageUri;
-        return (
-          <View
-            key={`measure-${msg._id}`}
-            onLayout={(e) => onMsgLayout(String(msg._id), e.nativeEvent.layout.height + messageGap)}
-            style={{
-              alignSelf: 'flex-start',
-              maxWidth: '92%',
-              minWidth: 120,
-              paddingHorizontal: isImage && hasImageUri ? 0 : 14,
-              paddingVertical: isImage && hasImageUri ? 0 : 10,
-              marginBottom: messageGap,
-            }}
-          >
-            {!isImage && !isVideoOrAudio && <Text style={{ fontWeight: '600', fontSize: fontSize - 1, marginBottom: 2 }}>{msg.senderName || ''}</Text>}
-            {showText && !isVideoOrAudio && <Text style={{ fontSize, lineHeight: fontSize * lineHeight }}>{msg.text || ''}</Text>}
-            {isImage && hasImageUri && <View style={{ width: 200, height: 200 }} />}
-            {isVideoOrAudio && (
-              <View style={{ flexDirection: 'row', gap: 12, width: '100%', height: 120 + 16 + 20 + 4 }} />
-            )}
-            {showTime && <Text style={{ fontSize: fontSize - 2, marginTop: 4 }}>{msg.sendingTime || ''}</Text>}
-          </View>
-        );
-      })}
+      {containerWidth > 0 && (() => {
+        return filteredMessages.slice(0, renderedUpTo).flatMap((msg) => {
+          const isImage = msg.messageType === 'image';
+          const isVideo = msg.messageType === 'video';
+          const isAudio = msg.messageType === 'audio';
+          const isVideoOrAudio = isVideo || isAudio;
+          const rawMedia = (msg as any).url || (msg as any).localPath;
+          const hasImageUri = typeof rawMedia === 'string' && rawMedia.length > 0;
+          const imageOnly = isImage && hasImageUri;
+          const isMedia = isImage || isVideo;
+
+          // Time content — mirrors render pass exactly
+          const timeContent = showTime && dateFormat === 'full'
+            ? msg.sendingTime || ''
+            : showTime && dateFormat === 'timeOnly'
+            ? (msg.sendingTime || '').split(',').pop()?.trim() || msg.sendingTime || ''
+            : '';
+
+          // Render the inner bubble content (shared between both variants)
+          const bubbleContent = (withName: boolean) => (
+            <>
+              {/* Sender name — only in the "withName" variant, and never for media */}
+              {withName && !isMedia && (
+                <Text style={{ fontWeight: '600', fontSize: fontSize - 1, marginBottom: 2 }}>
+                  {msg.senderName || ''}
+                </Text>
+              )}
+              {/* Text — with paddingRight:60 matching styles.messageText */}
+              {!imageOnly && !isVideoOrAudio && (
+                <Text style={{ fontSize, lineHeight: fontSize * lineHeight, paddingRight: 60, flexWrap: 'wrap' }}>
+                  {msg.text || ''}
+                </Text>
+              )}
+              {/* Image placeholder — matches styles.messageImage */}
+              {imageOnly && (
+                <View style={{ width: '100%', minWidth: 150, aspectRatio: 1, maxHeight: 200 }} />
+              )}
+              {/* Video/Audio — matches qrContainer height */}
+              {isVideoOrAudio && (
+                <View style={{ flexDirection: 'row', alignItems: 'center', paddingVertical: 8, gap: 12, height: 120 + 16 + 18 }} />
+              )}
+              {/* Time row — marginTop:-20 overlaps last text line */}
+              {timeContent ? (
+                <View style={{ flexDirection: 'row', justifyContent: 'flex-end', alignItems: 'flex-end', marginTop: -20 }}>
+                  <Text style={{ flex: 1 }} />
+                  <Text style={{ fontSize: fontSize - 2, opacity: 0.7, paddingLeft: 8 }}>{timeContent}</Text>
+                </View>
+              ) : null}
+            </>
+          );
+
+          const cacheWidth = Math.round(containerWidth);
+          const cacheKeyWith = `${msg._id}_${cacheWidth}_withName`;
+          const cacheKeyNo   = `${msg._id}_${cacheWidth}_noName`;
+          const bothCached = globalHeightCache[cacheKeyWith] !== undefined && globalHeightCache[cacheKeyNo] !== undefined;
+
+          if (bothCached) return []; // Already in cache, no need to render
+
+          return [
+            // Variant 1: with sender name
+            <View
+              key={`measure-with-${msg._id}`}
+              style={{ maxWidth: '92%', minWidth: 120, alignSelf: 'flex-start', marginBottom: messageGap }}
+            >
+              <View
+                onLayout={(e) => {
+                  const h = e.nativeEvent.layout.height + messageGap;
+                  globalHeightCache[cacheKeyWith] = h;
+                  // Only call onMsgLayout once both variants are measured
+                  if (globalHeightCache[cacheKeyNo] !== undefined) {
+                    onMsgLayout(String(msg._id), globalHeightCache[cacheKeyWith], globalHeightCache[cacheKeyNo]);
+                  }
+                }}
+                style={{ paddingHorizontal: imageOnly ? 0 : 10, paddingVertical: imageOnly ? 0 : 6, overflow: 'hidden' }}
+              >
+                {bubbleContent(true)}
+              </View>
+            </View>,
+            // Variant 2: without sender name
+            <View
+              key={`measure-no-${msg._id}`}
+              style={{ maxWidth: '92%', minWidth: 120, alignSelf: 'flex-start', marginBottom: messageGap }}
+            >
+              <View
+                onLayout={(e) => {
+                  const h = e.nativeEvent.layout.height + messageGap;
+                  globalHeightCache[cacheKeyNo] = h;
+                  // Only call onMsgLayout once both variants are measured
+                  if (globalHeightCache[cacheKeyWith] !== undefined) {
+                    onMsgLayout(String(msg._id), globalHeightCache[cacheKeyWith], globalHeightCache[cacheKeyNo]);
+                  }
+                }}
+                style={{ paddingHorizontal: imageOnly ? 0 : 10, paddingVertical: imageOnly ? 0 : 6, overflow: 'hidden' }}
+              >
+                {bubbleContent(false)}
+              </View>
+            </View>,
+          ];
+        });
+      })()}
     </View>
     <View style={styles.pagesContainer}>
       {(() => {
@@ -1090,6 +1212,8 @@ export const BookPreviewPages: React.FC<BookPreviewPagesProps> = ({
                   backgroundColor: colors.background || '#e5ddd5',
                   paddingHorizontal: 12,
                   paddingVertical: 16,
+                  paddingBottom: 24, // extra bottom room so last message never touches the edge
+                  overflow: 'hidden',
                 },
               ]}
             >

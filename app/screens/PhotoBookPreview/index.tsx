@@ -58,6 +58,10 @@ const PhotoBookPreview: React.FC<PhotoBookPreviewProps> = ({
   const [calculatedPages, setCalculatedPages] = useState<IMessage[][] | null>(null);
   const [booksToUpload, setBooksToUpload] = useState<any[] | null>(null);
   const [uploadingBooks, setUploadingBooks] = useState(false);
+  /** 0–100 during handleUploadAndGeneratePdf (media + message payloads). */
+  const [uploadOverallPercent, setUploadOverallPercent] = useState(0);
+  /** Which part of upload is running — drives labels for pending rows + preview strip. */
+  const [uploadPhase, setUploadPhase] = useState<'idle' | 'creating' | 'media' | 'messages'>('idle');
   const [enrichedBooks, setEnrichedBooks] = useState<any[] | null>(null); // books with qrUrl/thumbnailUrl after upload
   const [isDraftRecalculating, setIsDraftRecalculating] = useState(false); // recalculating pages from draft
   const [draftBooks, setDraftBooks] = useState<any[] | null>(null); // recalculated books from draft
@@ -109,11 +113,14 @@ const PhotoBookPreview: React.FC<PhotoBookPreviewProps> = ({
     setCalculatedPages(pages);
     
     if (needsCalculation && pages.length > 0) {
-      // Import the splitting utility
-      const { splitBooksWithMediaByActualPages, formatDateRange } = require('../../utils/accurateBookSplitting');
+      const {
+        splitBooksWithMediaByActualPages,
+        formatDateRange,
+        collapseSplitFragmentsForBookMessages,
+      } = require('../../utils/accurateBookSplitting');
       
       if (pages.length > 200) {
-        // Multi-book: Split at exactly 200 pages
+        // Multi-book: Split at exactly 200 pages (books use collapsed logical messages)
         const books = splitBooksWithMediaByActualPages(pages, routeMediaFiles || [], 200);
         
         setBooksToUpload(books);
@@ -130,8 +137,7 @@ const PhotoBookPreview: React.FC<PhotoBookPreviewProps> = ({
           [{ text: 'OK' }]
         );
       } else {
-        // Single book
-        const allMessages = pages.flat();
+        const allMessages = collapseSplitFragmentsForBookMessages(pages);
         const book = {
           bookNumber: 1,
           messages: allMessages,
@@ -154,14 +160,17 @@ const PhotoBookPreview: React.FC<PhotoBookPreviewProps> = ({
   const handleDraftPagesCalculated = useCallback((pages: IMessage[][]) => {
     if (pages.length === 0) return;
 
-    const { splitBooksWithMediaByActualPages } = require('../../utils/accurateBookSplitting');
+    const {
+      splitBooksWithMediaByActualPages,
+      collapseSplitFragmentsForBookMessages,
+    } = require('../../utils/accurateBookSplitting');
 
     if (pages.length > 200) {
       const books = splitBooksWithMediaByActualPages(pages, [], 200);
       setDraftBooks(books);
       setTotalBooks(books.length);
     } else {
-      const allMessages = pages.flat();
+      const allMessages = collapseSplitFragmentsForBookMessages(pages);
       setDraftBooks([{ bookNumber: 1, messages: allMessages, actualPages: pages.length }]);
       setTotalBooks(1);
     }
@@ -179,10 +188,24 @@ const PhotoBookPreview: React.FC<PhotoBookPreviewProps> = ({
     }
     
     setUploadingBooks(true);
-    
+    setUploadOverallPercent(0);
+
+    const bookCount = booksToUpload.length;
+    for (const b of booksToUpload) {
+      dispatch(
+        updateBookUploadStatus({
+          chatId,
+          bookNumber: b.bookNumber,
+          status: 'pending',
+          progress: 0,
+        }),
+      );
+    }
+
     try {
+      setUploadPhase('creating');
+
       // Step 1: Create photobook with books metadata
-      
       const { createPhotoBook } = require('../../services/photoBookApi');
       
       // Calculate startMessageIndex for each book
@@ -222,7 +245,12 @@ const PhotoBookPreview: React.FC<PhotoBookPreviewProps> = ({
       
       // Upload media files ONCE (all books share the same media)
       const allMediaFiles = booksToUpload.flatMap((b: any) => b.mediaFiles);
-      if (allMediaFiles.length > 0) {
+      const hasMedia = allMediaFiles.length > 0;
+      const mediaPortion = hasMedia ? 38 : 0;
+      const messagesPortion = 100 - mediaPortion;
+
+      if (hasMedia) {
+        setUploadPhase('media');
         const data = new FormData();
         allMediaFiles.forEach((file: any) => {
           const fileUri = file.path.startsWith('file://') ? file.path : `file://${file.path}`;
@@ -232,15 +260,18 @@ const PhotoBookPreview: React.FC<PhotoBookPreviewProps> = ({
             type: getMimeType(file.name),
           } as any);
         });
-        
+
         const chatResponse = await uploadChatMedia(chatId, data, (percent: number) => {
-          // Upload progress callback
+          setUploadOverallPercent(Math.min(100, Math.round((percent * mediaPortion) / 100)));
         });
         updatedChat = chatResponse.data.data;
         qrMap = chatResponse.data.qrMap || {};
         thumbnailMap = chatResponse.data.thumbnailMap || {};
+        setUploadOverallPercent(mediaPortion);
       }
-      
+
+      setUploadPhase('messages');
+
       // Upload messages for each book
       const enrichedBooksData: any[] = [];
       let globalMessageIndex = 0; // Track global message index across all books
@@ -249,7 +280,9 @@ const PhotoBookPreview: React.FC<PhotoBookPreviewProps> = ({
         const book = booksToUpload[i];
         const bookNumber = book.bookNumber;
         const bookStartIndex = globalMessageIndex; // Save start index for this book
-        
+        const bookSliceStart = mediaPortion + (messagesPortion * i) / bookCount;
+        const bookSliceSpan = messagesPortion / bookCount;
+
         try {
           // Update status to uploading
           dispatch(updateBookUploadStatus({
@@ -299,8 +332,22 @@ const PhotoBookPreview: React.FC<PhotoBookPreviewProps> = ({
             return payload;
           });
           
-          await bulkMessages(chatId, messagesPayload);
-          
+          await bulkMessages(chatId, messagesPayload, (p: number) => {
+            const overall = Math.round(bookSliceStart + (bookSliceSpan * p) / 100);
+            setUploadOverallPercent(Math.min(100, overall));
+            dispatch(
+              updateBookUploadStatus({
+                chatId,
+                bookNumber,
+                status: 'uploading',
+                progress: Math.min(100, Math.max(0, p)),
+              }),
+            );
+          });
+          setUploadOverallPercent(
+            Math.min(100, Math.round(bookSliceStart + bookSliceSpan)),
+          );
+
           // Store enriched messages for preview
           enrichedBooksData.push({ ...book, messages: enrichedMessages });
           
@@ -346,6 +393,8 @@ const PhotoBookPreview: React.FC<PhotoBookPreviewProps> = ({
       
       setBooksToUpload(null); // Clear booksToUpload so UI switches to normal mode
       setUploadingBooks(false);
+      setUploadOverallPercent(0);
+      setUploadPhase('idle');
       
       Alert.alert('Success', 'Books uploaded successfully! You can now generate PDF.');
       
@@ -354,6 +403,8 @@ const PhotoBookPreview: React.FC<PhotoBookPreviewProps> = ({
       console.error('❌ Error details:', error.response?.data || error.message);
       Alert.alert('Error', `Upload failed: ${error.response?.data?.message || error.message || 'Unknown error'}`);
       setUploadingBooks(false);
+      setUploadOverallPercent(0);
+      setUploadPhase('idle');
     }
   };
 
@@ -403,6 +454,54 @@ const PhotoBookPreview: React.FC<PhotoBookPreviewProps> = ({
     });
     return hasPdf;
   }, [photoBook, generatingPdf]);
+
+  /** Same inputs as the Format / Pages / Price block — used for labels + explanation text. */
+  const pricingBreakdown = React.useMemo(() => {
+    const { calculateTotalPrice } = require('../../utils/pricingUtils');
+    const fmt = format || photoBook?.format || 'standard_14_8x21';
+
+    type Row = { bookNumber: number; pages: number; price: number };
+    let rows: Row[] = [];
+
+    if (booksToUpload && booksToUpload.length > 0) {
+      rows = booksToUpload.map((b: any) => {
+        const pages = Number(b.actualPages) || 30;
+        return {
+          bookNumber: b.bookNumber,
+          pages,
+          price: calculateTotalPrice(fmt, pages),
+        };
+      });
+    } else if (photoBook?.books && photoBook.books.length > 0) {
+      rows = photoBook.books.map((b: any) => {
+        const pages = Number(b.estimatedPages) || 30;
+        return {
+          bookNumber: b.bookNumber,
+          pages,
+          price: calculateTotalPrice(fmt, pages),
+        };
+      });
+    } else {
+      const pages = Number(pageCount ?? photoBook?.pageCount ?? 30) || 30;
+      rows = [{ bookNumber: 1, pages, price: calculateTotalPrice(fmt, pages) }];
+    }
+
+    const totalPages = rows.reduce((s, r) => s + r.pages, 0);
+    const totalPrice = rows.reduce((s, r) => s + r.price, 0);
+    const multiBook = rows.length > 1;
+    const hitsPageTierCap =
+      (fmt === 'standard_14_8x21' || fmt === 'square_14x14') &&
+      rows.some((r) => r.pages > 200);
+
+    return {
+      fmt,
+      rows,
+      totalPages,
+      totalPriceFormatted: totalPrice.toFixed(2),
+      multiBook,
+      hitsPageTierCap,
+    };
+  }, [booksToUpload, photoBook, pageCount, format]);
 
   // NEW: Filter messages for current book
   const currentBookMessages = React.useMemo(() => {
@@ -995,7 +1094,13 @@ const PhotoBookPreview: React.FC<PhotoBookPreviewProps> = ({
             {uploadingBooks && (
               <View style={styles.uploadProgressContainer}>
                 <ActivityIndicator size="small" color={COLORS.lightBlue} />
-                <Text style={styles.uploadProgressText}>Uploading books...</Text>
+                <Text style={styles.uploadProgressText}>
+                  {uploadPhase === 'media'
+                    ? `Media uploading… ${uploadOverallPercent}%`
+                    : uploadPhase === 'creating'
+                    ? 'Preparing…'
+                    : `Uploading… ${uploadOverallPercent}%`}
+                </Text>
               </View>
             )}
             
@@ -1123,98 +1228,168 @@ const PhotoBookPreview: React.FC<PhotoBookPreviewProps> = ({
           <View style={styles.detailRow}>
             <Text style={styles.detailLabel}>Pages:</Text>
             <Text style={styles.detailValue}>
-              {(() => {
-                // Calculate TOTAL pages across ALL books
-                if (booksToUpload && booksToUpload.length > 0) {
-                  const totalPages = booksToUpload.reduce((sum, book) => sum + (book.actualPages || 0), 0);
-                  return totalPages;
-                } else if (photoBook?.books && photoBook.books.length > 0) {
-                  const totalPages = photoBook.books.reduce((sum, book) => sum + (book.estimatedPages || 0), 0);
-                  return totalPages;
-                }
-                return pageCount ?? photoBook?.pageCount ?? 30;
-              })()}
+              {pricingBreakdown.totalPages}
+              {pricingBreakdown.multiBook ? (
+                <Text style={styles.detailValueMuted}>
+                  {' '}
+                  ({pricingBreakdown.rows.length} books)
+                </Text>
+              ) : null}
             </Text>
           </View>
           <View style={styles.detailRow}>
             <Text style={styles.detailLabel}>Total Price:</Text>
-            <Text style={styles.detailValue}>
-              ${(() => {
-                // Calculate price for ALL books combined
-                const { calculateTotalPrice } = require('../../utils/pricingUtils');
-                const currentFormat = format || photoBook?.format || 'standard_14_8x21';
-                
-                if (booksToUpload && booksToUpload.length > 0) {
-                  const totalPrice = booksToUpload.reduce((sum, book) => {
-                    const bookPrice = calculateTotalPrice(currentFormat, book.actualPages || 30);
-                    return sum + bookPrice;
-                  }, 0);
-                  return totalPrice.toFixed(2);
-                } else if (photoBook?.books && photoBook.books.length > 0) {
-                  const totalPrice = photoBook.books.reduce((sum, book) => {
-                    const bookPrice = calculateTotalPrice(currentFormat, book.estimatedPages || 30);
-                    return sum + bookPrice;
-                  }, 0);
-                  return totalPrice.toFixed(2);
-                }
-                
-                // Single book fallback
-                const actualPageCount = pageCount ?? photoBook?.pageCount ?? 30;
-                const dynamicPrice = calculateTotalPrice(currentFormat, actualPageCount);
-                return dynamicPrice.toFixed(2);
-              })()}
+            <Text style={styles.detailValue}>${pricingBreakdown.totalPriceFormatted}</Text>
+          </View>
+
+          <View style={styles.pricingExplainBox}>
+            <Text style={styles.pricingExplainTitle}>
+              How this total is calculated (
+              {pricingBreakdown.rows.length === 1
+                ? '1 book'
+                : `${pricingBreakdown.rows.length} books`}
+              )
             </Text>
+            {pricingBreakdown.multiBook ? (
+              <>
+                <Text style={styles.pricingExplainBody}>
+                  Your order includes {pricingBreakdown.rows.length} printed books —{' '}
+                  <Text style={styles.pricingExplainEm}>Book 1</Text> through{' '}
+                  <Text style={styles.pricingExplainEm}>
+                    Book {pricingBreakdown.rows.length}
+                  </Text>
+                  , matching the numbered buttons above the preview. The page total adds every book’s
+                  pages; the dollar total adds each book’s price from its own page count.
+                </Text>
+                {pricingBreakdown.rows.map((r) => (
+                  <Text key={r.bookNumber} style={styles.pricingExplainLine}>
+                    • Book {r.bookNumber}: {r.pages} pages → ${r.price.toFixed(2)}
+                  </Text>
+                ))}
+                <Text style={styles.pricingExplainSum}>
+                  = ${pricingBreakdown.totalPriceFormatted}
+                </Text>
+              </>
+            ) : (
+              <Text style={styles.pricingExplainBody}>
+                This order is <Text style={styles.pricingExplainEm}>1 printed book</Text> (
+                {pricingBreakdown.rows[0]?.pages ?? pricingBreakdown.totalPages} pages) at our rate for
+                this format → ${pricingBreakdown.totalPriceFormatted}.
+              </Text>
+            )}
+            {pricingBreakdown.hitsPageTierCap ? (
+              <Text style={styles.pricingExplainNote}>
+                Note: For this format our table caps each book at the 200-page tier and up (extra pages
+                beyond that do not increase the price until we publish wider tiers).
+              </Text>
+            ) : null}
           </View>
         </View>
 
-        {/* 🔥 Upload Books button OR upload status (before photoBook is loaded) */}
-        {booksToUpload && !photoBook && (
-          uploadingBooks ? (
-            // Show upload status for each book
-            <View style={styles.uploadStatusContainer}>
-              {Array.from({ length: booksToUpload.length }, (_, i) => i + 1).map(bookNum => {
-                const statusData = bookUploadStatus[bookNum] || { status: 'pending', progress: 0 };
-                const { status, error } = statusData;
-                
-                return (
-                  <View key={bookNum} style={styles.uploadStatusRow}>
-                    <Text style={styles.uploadStatusLabel}>Book {bookNum}:</Text>
-                    {status === 'pending' && (
-                      <Text style={styles.uploadStatusText}>⏳ Pending...</Text>
-                    )}
-                    {status === 'uploading' && (
-                      <View style={styles.uploadStatusInline}>
-                        <ActivityIndicator size="small" color={COLORS.lightBlue} />
-                        <Text style={styles.uploadStatusTextUploading}>Uploading...</Text>
-                      </View>
-                    )}
-                    {status === 'completed' && (
-                      <Text style={styles.uploadStatusTextSuccess}>✅ Uploaded</Text>
-                    )}
-                    {status === 'failed' && (
-                      <View style={styles.uploadStatusInline}>
-                        <Text style={styles.uploadStatusTextFailed}>❌ Failed</Text>
-                        <TouchableOpacity
-                          style={styles.retryButtonSmall}
-                          onPress={() => handleRetryUpload(bookNum)}
-                        >
-                          <Text style={styles.retryButtonTextSmall}>Retry</Text>
-                        </TouchableOpacity>
-                      </View>
-                    )}
-                  </View>
-                );
-              })}
+        {/* Steps stay visible until PDFs exist; upload UI only before photoBook is created */}
+        {!pdfGenerated && (
+          <View style={styles.uploadWorkflowSection}>
+            <View style={styles.workflowStepsCard}>
+              <Text style={styles.workflowStepsTitle}>What to do next</Text>
+              {photoBook ? (
+                <>
+                  <Text style={styles.workflowStepLine}>
+                    <Text style={styles.workflowStepBold}>Step 1 — Uploaded.</Text> Your book is saved
+                    on our servers. You can open <Text style={styles.workflowStepBold}>Drafts</Text> anytime
+                    to see it or start another upload.
+                  </Text>
+                  <Text style={styles.workflowStepLine}>
+                    <Text style={styles.workflowStepBold}>Step 2 — Generate PDF.</Text> Tap{' '}
+                    <Text style={styles.workflowStepBold}>Generate PDF</Text> below. Wait until each PDF
+                    is ready, then preview it.
+                  </Text>
+                  <Text style={styles.workflowStepLine}>
+                    <Text style={styles.workflowStepBold}>Step 3 — Order.</Text> When you are happy with
+                    the PDFs, place your order.
+                  </Text>
+                </>
+              ) : (
+                <>
+                  <Text style={styles.workflowStepLine}>
+                    <Text style={styles.workflowStepBold}>Step 1 — Upload.</Text> Tap the button below to
+                    upload your book to our servers. Long chats and chats with lots of media take longer;
+                    keep the app open and hold tight. Wait until you see a success message. You can open{' '}
+                    <Text style={styles.workflowStepBold}>Drafts</Text> to see books you have already
+                    uploaded.
+                  </Text>
+                  <Text style={styles.workflowStepLine}>
+                    <Text style={styles.workflowStepBold}>Step 2 — Generate PDF.</Text> When the upload
+                    finishes, tap <Text style={styles.workflowStepBold}>Generate PDF</Text>. Wait until
+                    each PDF is ready, then preview it.
+                  </Text>
+                  <Text style={styles.workflowStepLine}>
+                    <Text style={styles.workflowStepBold}>Step 3 — Order.</Text> When you are happy with
+                    the PDFs, place your order.
+                  </Text>
+                </>
+              )}
             </View>
-          ) : (
-            // Show Upload Books button
-            <CustomButton
-              text="Upload Books"
-              onPress={handleUploadAndGeneratePdf}
-              animating={false}
-              disable={false}
-            />
-          )
+
+            {booksToUpload && !photoBook && (
+              uploadingBooks ? (
+                <View style={styles.uploadStatusContainer}>
+                  <Text style={styles.uploadOverallPercent}>
+                    Overall progress: {uploadOverallPercent}%
+                  </Text>
+                  {Array.from({ length: booksToUpload.length }, (_, i) => i + 1).map(bookNum => {
+                    const statusData = bookUploadStatus[bookNum] || { status: 'pending', progress: 0 };
+                    const { status, progress } = statusData;
+
+                    return (
+                      <View key={bookNum} style={styles.uploadStatusRow}>
+                        <Text style={styles.uploadStatusLabel}>Book {bookNum}</Text>
+                        {status === 'pending' && (
+                          <Text style={styles.uploadStatusText}>
+                            {uploadPhase === 'media'
+                              ? 'Media uploading…'
+                              : uploadPhase === 'creating'
+                              ? 'Preparing…'
+                              : 'Next in line — another book is uploading'}
+                          </Text>
+                        )}
+                        {status === 'uploading' && (
+                          <View style={styles.uploadStatusInline}>
+                            <ActivityIndicator size="small" color={COLORS.lightBlue} />
+                            <Text style={styles.uploadStatusTextUploading}>
+                              {typeof progress === 'number' && progress > 0
+                                ? `${progress}%`
+                                : `${uploadOverallPercent}%`}
+                            </Text>
+                          </View>
+                        )}
+                        {status === 'completed' && (
+                          <Text style={styles.uploadStatusTextSuccess}>✅ Uploaded</Text>
+                        )}
+                        {status === 'failed' && (
+                          <View style={styles.uploadStatusInline}>
+                            <Text style={styles.uploadStatusTextFailed}>❌ Failed</Text>
+                            <TouchableOpacity
+                              style={styles.retryButtonSmall}
+                              onPress={() => handleRetryUpload(bookNum)}
+                            >
+                              <Text style={styles.retryButtonTextSmall}>Retry</Text>
+                            </TouchableOpacity>
+                          </View>
+                        )}
+                      </View>
+                    );
+                  })}
+                </View>
+              ) : (
+                <CustomButton
+                  text="Upload Books"
+                  onPress={handleUploadAndGeneratePdf}
+                  animating={false}
+                  disable={false}
+                />
+              )
+            )}
+          </View>
         )}
 
         {!pdfGenerated && photoBook && (
@@ -1474,6 +1649,58 @@ const styles = StyleSheet.create({
     fontSize: rfs(16),
     fontFamily: fonts.POPPINS.SemiBold,
     color: COLORS.textBlack,
+    flexShrink: 1,
+    textAlign: 'right',
+  },
+  detailValueMuted: {
+    fontSize: rfs(14),
+    fontFamily: fonts.POPPINS.Regular,
+    color: COLORS.textGray,
+    fontWeight: '400',
+  },
+  pricingExplainBox: {
+    marginTop: hp(1.5),
+    paddingTop: hp(1.5),
+    borderTopWidth: 1,
+    borderTopColor: COLORS.white2,
+  },
+  pricingExplainTitle: {
+    fontSize: rfs(13),
+    fontFamily: fonts.POPPINS.SemiBold,
+    color: COLORS.textBlack,
+    marginBottom: hp(0.8),
+  },
+  pricingExplainEm: {
+    fontFamily: fonts.POPPINS.SemiBold,
+    color: COLORS.textBlack,
+  },
+  pricingExplainBody: {
+    fontSize: rfs(12),
+    fontFamily: fonts.POPPINS.Regular,
+    color: COLORS.textGray,
+    lineHeight: rfs(18),
+    marginBottom: hp(0.6),
+  },
+  pricingExplainLine: {
+    fontSize: rfs(12),
+    fontFamily: fonts.POPPINS.Regular,
+    color: COLORS.textBlack,
+    lineHeight: rfs(18),
+    marginLeft: wp(1),
+  },
+  pricingExplainSum: {
+    fontSize: rfs(12),
+    fontFamily: fonts.POPPINS.SemiBold,
+    color: COLORS.textBlack,
+    marginTop: hp(0.5),
+  },
+  pricingExplainNote: {
+    fontSize: rfs(11),
+    fontFamily: fonts.POPPINS.Regular,
+    color: COLORS.textGray,
+    lineHeight: rfs(16),
+    marginTop: hp(1),
+    fontStyle: 'italic',
   },
   // NEW: Book selector styles
   bookSelector: {
@@ -1623,6 +1850,41 @@ const styles = StyleSheet.create({
     fontFamily: fonts.POPPINS.Regular,
     color: COLORS.textBlack,
     marginBottom: hp(2),
+  },
+  uploadWorkflowSection: {
+    marginBottom: hp(2),
+  },
+  workflowStepsCard: {
+    backgroundColor: '#F5F7FA',
+    borderRadius: wp(2),
+    padding: wp(4),
+    marginBottom: hp(2),
+    borderWidth: 1,
+    borderColor: COLORS.lightGray,
+  },
+  workflowStepsTitle: {
+    fontSize: rfs(16),
+    fontFamily: fonts.POPPINS.SemiBold,
+    color: COLORS.textBlack,
+    marginBottom: hp(1.2),
+  },
+  workflowStepLine: {
+    fontSize: rfs(12),
+    fontFamily: fonts.POPPINS.Regular,
+    color: COLORS.textGray,
+    lineHeight: rfs(18),
+    marginBottom: hp(1),
+  },
+  workflowStepBold: {
+    fontFamily: fonts.POPPINS.SemiBold,
+    color: COLORS.textBlack,
+  },
+  uploadOverallPercent: {
+    fontSize: rfs(15),
+    fontFamily: fonts.POPPINS.SemiBold,
+    color: COLORS.lightBlue,
+    marginBottom: hp(1.5),
+    textAlign: 'center',
   },
   // 🔥 NEW: Upload progress styles
   uploadProgressContainer: {

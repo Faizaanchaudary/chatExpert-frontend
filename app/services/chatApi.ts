@@ -84,11 +84,24 @@ export async function getAllMessagesByChat(chatId: string): Promise<IMessage[]> 
 export function bulkMessages(
   chatId: string,
   messages: MessagePayload[],
+  onProgress?: (percent: number) => void,
 ): Promise<AxiosResponse<{ data: IMessage[] }>> {
-  return apiClient.post('/messages/bulk', {
-    chatId: chatId,
-    messages: messages,
-  });
+  return apiClient.post(
+    '/messages/bulk',
+    {
+      chatId: chatId,
+      messages: messages,
+    },
+    {
+      maxBodyLength: Infinity,
+      onUploadProgress: (progressEvent) => {
+        if (onProgress && progressEvent.total) {
+          const percent = Math.round((progressEvent.loaded * 100) / progressEvent.total);
+          onProgress(percent);
+        }
+      },
+    },
+  );
 }
 
 interface MessagePayload {

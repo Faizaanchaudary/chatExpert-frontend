@@ -8,15 +8,17 @@ export const classicTheme: ThemeDefinition = {
     fontSize: 11,
     lineHeight: 1.5,
     colors: {
-      background: '#ffffff',
+      // WhatsApp-style chat: brand green sent bubbles, dark grey received + white text
+      background: '#ECE5DD',
       text: '#1a1a1a',
-      accent: '#2c5282',
-      senderBubble: '#e1ffc7',
-      receiverBubble: '#ffffff',
-      senderText: '#000000',
-      receiverText: '#000000',
-      bubbleBorder: '#d4e5d0',
-      bubbleShadow: 'rgba(0,0,0,0.08)',
+      accent: '#128C7E',
+      // WhatsApp-style sent bubble (dark teal — same family as WhatsApp dark / default sent chip, not logo #25D366)
+      senderBubble: '#005C4B',
+      receiverBubble: '#2A3942',
+      senderText: '#FFFFFF',
+      receiverText: '#FFFFFF',
+      bubbleBorder: 'transparent',
+      bubbleShadow: 'rgba(0,0,0,0.12)',
     },
     layout: {
       dateFormat: 'full',

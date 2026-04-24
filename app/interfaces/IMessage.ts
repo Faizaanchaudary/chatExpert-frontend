@@ -38,6 +38,11 @@ export interface IMessage {
   heightEstimate?: number; // Add this property for page calculations
   /** true = sent by "me" (right side), false = received (left side) */
   sender?: boolean;
+
+  /** Pagination-only: hide time row on intermediate fragments of a split long text message */
+  __suppressTimeRow?: boolean;
+  /** Stable key for split fragments in preview lists */
+  __splitFragKey?: string;
 }
 
 export interface AiParsedMessage {

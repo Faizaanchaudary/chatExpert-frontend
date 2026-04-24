@@ -6,6 +6,28 @@
 
 import { IMessage } from '../interfaces/IMessage';
 
+/**
+ * Merge consecutive rows with the same _id (long text split across pages) into one logical message for upload/API.
+ */
+export function collapseSplitFragmentsForBookMessages(pages: IMessage[][]): IMessage[] {
+  const flat = pages.flat();
+  const out: IMessage[] = [];
+  for (const m of flat) {
+    const last = out[out.length - 1];
+    if (last && String(last._id) === String(m._id)) {
+      last.text = (last.text || '') + (m.text || '');
+      delete last.__suppressTimeRow;
+      delete last.__splitFragKey;
+      continue;
+    }
+    const copy: IMessage = { ...m };
+    delete copy.__suppressTimeRow;
+    delete copy.__splitFragKey;
+    out.push(copy);
+  }
+  return out;
+}
+
 export interface AccurateBook {
   bookNumber: number;
   messages: IMessage[];
@@ -35,7 +57,7 @@ export function splitBooksByActualPages(
     // Check if adding this page would exceed max pages
     if (currentBookPages.length >= maxPagesPerBook && currentBookPages.length > 0) {
       // Save current book
-      const allMessages = currentBookPages.flat();
+      const allMessages = collapseSplitFragmentsForBookMessages(currentBookPages);
       books.push({
         bookNumber,
         messages: allMessages,
@@ -57,7 +79,7 @@ export function splitBooksByActualPages(
   
   // Add last book
   if (currentBookPages.length > 0) {
-    const allMessages = currentBookPages.flat();
+    const allMessages = collapseSplitFragmentsForBookMessages(currentBookPages);
     books.push({
       bookNumber,
       messages: allMessages,

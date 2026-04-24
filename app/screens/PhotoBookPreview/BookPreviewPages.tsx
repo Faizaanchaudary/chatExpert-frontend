@@ -49,6 +49,97 @@ function filterSystemMessages(messages: IMessage[]): IMessage[] {
   return (messages || []).filter((m) => !isSystemMessage(m));
 }
 
+/** Plain text only — pagination may split across pages (aligned with pdfService). */
+function isSplittableTextMessage(msg: IMessage): boolean {
+  const t = msg.messageType;
+  if (t === 'image' || t === 'video' || t === 'audio') return false;
+  const text = String(msg.text || '');
+  if (!text.trim()) return false;
+  return t === 'text' || t === 'unknown' || !t;
+}
+
+function snapUtf16PrefixEnd(str: string, end: number): number {
+  if (end <= 0) return 0;
+  if (end < str.length) {
+    const c = str.charCodeAt(end);
+    if (c >= 0xdc00 && c <= 0xdfff) return end - 1;
+  }
+  if (end > 0) {
+    const c = str.charCodeAt(end - 1);
+    if (c >= 0xd800 && c <= 0xdbff) {
+      if (end < str.length) return end + 1;
+      return end - 1;
+    }
+  }
+  return end;
+}
+
+/** Height estimate for a text slice — mirrors backend text bubble formula using preview widths. */
+function estimateTextSliceHeightPreview(
+  containerWidth: number,
+  fontSize: number,
+  lineHeight: number,
+  text: string,
+  showName: boolean,
+  messageGap: number
+): number {
+  const bubbleWidth = containerWidth * 0.92 - 20;
+  const textWidth = Math.max(40, bubbleWidth - 60);
+  const charsPerLine = Math.max(1, Math.floor(textWidth / (fontSize * 0.55)));
+  const str = String(text || '');
+  const lineCount = str.split('\n').reduce((acc, line) => {
+    return acc + Math.max(1, Math.ceil((line.length || 1) / charsPerLine));
+  }, 0);
+  const textH = lineCount * fontSize * lineHeight;
+  const nameH = showName ? fontSize - 1 + 2 : 0;
+  return nameH + textH + 12 + messageGap;
+}
+
+function longestFittingPrefixPreview(
+  containerWidth: number,
+  fontSize: number,
+  lineHeight: number,
+  messageGap: number,
+  remaining: string,
+  maxHeight: number,
+  withName: boolean
+): number {
+  const measureLen = (len: number) => {
+    const end = snapUtf16PrefixEnd(remaining, len);
+    if (end < 1) return Number.POSITIVE_INFINITY;
+    const slice = remaining.slice(0, end);
+    return estimateTextSliceHeightPreview(containerWidth, fontSize, lineHeight, slice, withName, messageGap);
+  };
+
+  const fullEnd = snapUtf16PrefixEnd(remaining, remaining.length);
+  const fullH = measureLen(fullEnd);
+  if (fullH <= maxHeight) return fullEnd;
+
+  let lo = 1;
+  let hi = fullEnd;
+  let best = 0;
+  while (lo <= hi) {
+    const mid = Math.floor((lo + hi) / 2);
+    const midAdj = snapUtf16PrefixEnd(remaining, mid);
+    if (midAdj < 1) {
+      lo = mid + 1;
+      continue;
+    }
+    const h = measureLen(midAdj);
+    if (h <= maxHeight) {
+      best = midAdj;
+      lo = midAdj + 1;
+    } else {
+      hi = midAdj - 1;
+    }
+  }
+  if (best === 0) {
+    best = snapUtf16PrefixEnd(remaining, 1);
+    if (best < 1) best = 1;
+  }
+  return best;
+}
+
 /** Sender that appears most often = "me" (right side), same as Chat screen. */
 function getMostFrequentSenderName(msgs: IMessage[]): string | null {
   if (msgs.length === 0) return null;
@@ -243,7 +334,7 @@ function renderImageGrid(
         {timeContent && (
           <Text style={[styles.gridTime, {
             fontSize: fontSize - 2,
-            color: isSender ? colors.senderText || '#000' : colors.receiverText || '#000',
+            color: isSender ? colors.senderText || '#FFFFFF' : colors.receiverText || '#FFFFFF',
             textAlign: isSender ? 'right' : 'left',
             paddingHorizontal: 8,
             paddingTop: 4,
@@ -272,7 +363,7 @@ function renderImageGrid(
         {timeContent && (
           <Text style={[styles.gridTime, { 
             fontSize: fontSize - 2, 
-            color: isSender ? colors.senderText || '#000' : colors.receiverText || '#000',
+            color: isSender ? colors.senderText || '#FFFFFF' : colors.receiverText || '#FFFFFF',
             textAlign: isSender ? 'right' : 'left',
             paddingHorizontal: 8,
             paddingTop: 4,
@@ -309,7 +400,7 @@ function renderImageGrid(
         {timeContent && (
           <Text style={[styles.gridTime, { 
             fontSize: fontSize - 2, 
-            color: isSender ? colors.senderText || '#000' : colors.receiverText || '#000',
+            color: isSender ? colors.senderText || '#FFFFFF' : colors.receiverText || '#FFFFFF',
             textAlign: isSender ? 'right' : 'left',
             paddingHorizontal: 8,
             paddingTop: 4,
@@ -345,7 +436,7 @@ function renderImageGrid(
         {timeContent && (
           <Text style={[styles.gridTime, { 
             fontSize: fontSize - 2, 
-            color: isSender ? colors.senderText || '#000' : colors.receiverText || '#000',
+            color: isSender ? colors.senderText || '#FFFFFF' : colors.receiverText || '#FFFFFF',
             textAlign: isSender ? 'right' : 'left',
             paddingHorizontal: 8,
             paddingTop: 4,
@@ -583,7 +674,7 @@ export const BookPreviewPages: React.FC<BookPreviewPagesProps> = ({
 
     // For grid layout: pre-group consecutive images so pagination uses grid heights
     // (smaller than full-page image height), allowing multiple images per page.
-    type PaginationItem = { messages: IMessage[]; height: number };
+    type PaginationItem = { messages: IMessage[]; height: number; nameWillShow?: boolean };
     let items: PaginationItem[];
 
     if (imageLayout === 'grid' || imageLayout === 'maxGrid') {
@@ -605,17 +696,29 @@ export const BookPreviewPages: React.FC<BookPreviewPagesProps> = ({
       };
 
       items = [];
+      let gLastSender: string | null = null;
+      let gLastSide: boolean | null = null;
       for (const item of grouped) {
         if (!Array.isArray(item)) {
+          const isMedia = item.messageType === 'image' || item.messageType === 'video';
+          const senderName = item.senderName || null;
+          const senderSide = isMessageFromMe(item.senderName || '', meName);
+          const nameWillShow =
+            !isMedia && (gLastSender !== senderName || gLastSide !== senderSide);
+          gLastSender = senderName;
+          gLastSide = senderSide;
           const heights = msgHeights[String(item._id)];
-          items.push({ messages: [item], height: heights ? heights.withName : 65 });
+          const h = heights ? (nameWillShow ? heights.withName : heights.noName) : 65;
+          items.push({ messages: [item], height: h, nameWillShow });
           continue;
         }
+        gLastSender = null;
+        gLastSide = null;
         // Split large groups into chunks that fit within one page
         const chunkSize = item.length > maxImagesPerPage ? maxImagesPerPage : item.length;
         for (let i = 0; i < item.length; i += chunkSize) {
           const chunk = item.slice(i, i + chunkSize);
-          items.push({ messages: chunk, height: getGridH(chunk.length) });
+          items.push({ messages: chunk, height: getGridH(chunk.length), nameWillShow: false });
         }
       }
     } else {
@@ -636,82 +739,210 @@ export const BookPreviewPages: React.FC<BookPreviewPagesProps> = ({
         const h = heights
           ? (nameWillShow ? heights.withName : heights.noName)
           : 65;
-        return { messages: [msg], height: h };
+        return { messages: [msg], height: h, nameWillShow };
       });
     }
 
+    let splitFragCounter = 0;
     for (const item of items) {
       const firstMsg = item.messages[0];
-      let rawMsgH = item.height;
-      let headerH = 0;
+      // Only split when taller than one page — else use measured height + original atomic pagination.
+      const singleSplittable =
+        item.messages.length === 1 &&
+        isSplittableTextMessage(firstMsg) &&
+        item.height > availableHeight;
 
-      // ── Sender-name correction ──────────────────────────────────────────
-      // When a date/year/month header fires, the render pass resets lastSender
-      // so the first message after a header always shows the name.
-      // Mirror that same reset here so the correct height variant is used.
+      if (!singleSplittable) {
+        let rawMsgH = item.height;
+        let headerH = 0;
 
-      if (dateFormat === 'full') {
-        const msgDateStr = firstMsg.date || firstMsg.sendingTime || '';
-        const ym = getYearMonth(msgDateStr);
-        const formattedDate = formatDate(msgDateStr, dateStyle, dateLanguage);
-        if (ym && ym.year !== lastYear) {
-          headerH += 68;
-          // Year header resets sender tracking in render pass
-          paginationLastSenderName = null;
-          paginationLastSenderSide = null;
-        }
-        if (ym && ym.month !== lastMonth) {
-          headerH += 48;
-          paginationLastSenderName = null;
-          paginationLastSenderSide = null;
-        }
-        if (formattedDate && formattedDate !== lastDate) {
-          headerH += 44;
-          paginationLastSenderName = null;
-          paginationLastSenderSide = null;
-        }
-      }
-
-      // Update pagination sender tracking
-      const itemSenderName = firstMsg.senderName || null;
-      const itemSenderSide = isMessageFromMe(firstMsg.senderName || '', meName);
-      paginationLastSenderName = itemSenderName;
-      paginationLastSenderSide = itemSenderSide;
-
-      const totalH = rawMsgH + headerH;
-
-      // Special case: headers + message don't fit on an empty page.
-      if (currentPage.length === 0 && headerH > 0 && totalH > availableHeight) {
-        result.push([]);
         if (dateFormat === 'full') {
           const msgDateStr = firstMsg.date || firstMsg.sendingTime || '';
+          const ym = getYearMonth(msgDateStr);
+          const formattedDate = formatDate(msgDateStr, dateStyle, dateLanguage);
+          if (ym && ym.year !== lastYear) {
+            headerH += 68;
+            paginationLastSenderName = null;
+            paginationLastSenderSide = null;
+          }
+          if (ym && ym.month !== lastMonth) {
+            headerH += 48;
+            paginationLastSenderName = null;
+            paginationLastSenderSide = null;
+          }
+          if (formattedDate && formattedDate !== lastDate) {
+            headerH += 44;
+            paginationLastSenderName = null;
+            paginationLastSenderSide = null;
+          }
+        }
+
+        const itemSenderName = firstMsg.senderName || null;
+        const itemSenderSide = isMessageFromMe(firstMsg.senderName || '', meName);
+        paginationLastSenderName = itemSenderName;
+        paginationLastSenderSide = itemSenderSide;
+
+        const totalH = rawMsgH + headerH;
+
+        if (currentPage.length === 0 && headerH > 0 && totalH > availableHeight) {
+          result.push([]);
+          if (dateFormat === 'full') {
+            const msgDateStr = firstMsg.date || firstMsg.sendingTime || '';
+            const ym = getYearMonth(msgDateStr);
+            const formattedDate = formatDate(msgDateStr, dateStyle, dateLanguage);
+            if (ym) { lastYear = ym.year; lastMonth = ym.month; }
+            if (formattedDate) lastDate = formattedDate;
+          }
+          currentPage.push(...item.messages);
+          usedH = rawMsgH;
+          continue;
+        }
+
+        if (usedH + totalH > availableHeight && currentPage.length > 0) {
+          result.push(currentPage);
+          currentPage = [...item.messages];
+          usedH = totalH;
+        } else {
+          currentPage.push(...item.messages);
+          usedH += totalH;
+        }
+
+        if (dateFormat === 'full') {
+          const lastMsg = item.messages[item.messages.length - 1];
+          const msgDateStr = lastMsg.date || lastMsg.sendingTime || '';
           const ym = getYearMonth(msgDateStr);
           const formattedDate = formatDate(msgDateStr, dateStyle, dateLanguage);
           if (ym) { lastYear = ym.year; lastMonth = ym.month; }
           if (formattedDate) lastDate = formattedDate;
         }
-        currentPage.push(...item.messages);
-        usedH = rawMsgH;
         continue;
       }
 
-      if (usedH + totalH > availableHeight && currentPage.length > 0) {
-        result.push(currentPage);
-        currentPage = [...item.messages];
-        usedH = totalH;
-      } else {
-        currentPage.push(...item.messages);
-        usedH += totalH;
-      }
+      // Long plain-text message: split across pages (height estimate per fragment)
+      const baseMsg = firstMsg;
+      const nameOnFirst = item.nameWillShow !== false;
+      let remainder = String(baseMsg.text || '');
+      let firstFragOfMsg = true;
+      let splitGuard = 0;
+      const splitVerticalBuffer = Math.max(100, Math.ceil(fontSize * lineHeight) + 18);
 
-      // Update header tracking — use last message in group for date tracking
-      if (dateFormat === 'full') {
-        const lastMsg = item.messages[item.messages.length - 1];
-        const msgDateStr = lastMsg.date || lastMsg.sendingTime || '';
-        const ym = getYearMonth(msgDateStr);
-        const formattedDate = formatDate(msgDateStr, dateStyle, dateLanguage);
-        if (ym) { lastYear = ym.year; lastMonth = ym.month; }
-        if (formattedDate) lastDate = formattedDate;
+      const itemSenderName = baseMsg.senderName || null;
+      const itemSenderSide = isMessageFromMe(baseMsg.senderName || '', meName);
+      paginationLastSenderName = itemSenderName;
+      paginationLastSenderSide = itemSenderSide;
+
+      while (remainder.length > 0 && splitGuard++ < 10000) {
+        let headerH = 0;
+        if (dateFormat === 'full' && firstFragOfMsg) {
+          const msgDateStr = baseMsg.date || baseMsg.sendingTime || '';
+          const ym = getYearMonth(msgDateStr);
+          const formattedDate = formatDate(msgDateStr, dateStyle, dateLanguage);
+          if (ym && ym.year !== lastYear) {
+            headerH += 68;
+            paginationLastSenderName = null;
+            paginationLastSenderSide = null;
+          }
+          if (ym && ym.month !== lastMonth) {
+            headerH += 48;
+            paginationLastSenderName = null;
+            paginationLastSenderSide = null;
+          }
+          if (formattedDate && formattedDate !== lastDate) {
+            headerH += 44;
+            paginationLastSenderName = null;
+            paginationLastSenderSide = null;
+          }
+        }
+
+        if (firstFragOfMsg && currentPage.length === 0 && headerH > 0) {
+          const fullRestH = estimateTextSliceHeightPreview(
+            containerWidth,
+            fontSize,
+            lineHeight,
+            remainder,
+            nameOnFirst,
+            messageGap
+          );
+          if (headerH + fullRestH > availableHeight - splitVerticalBuffer) {
+            result.push([]);
+            const msgDateStr = baseMsg.date || baseMsg.sendingTime || '';
+            const ym = getYearMonth(msgDateStr);
+            const formattedDate = formatDate(msgDateStr, dateStyle, dateLanguage);
+            if (ym) { lastYear = ym.year; lastMonth = ym.month; }
+            if (formattedDate) lastDate = formattedDate;
+            continue;
+          }
+        }
+
+        if (currentPage.length > 0 && usedH + headerH > availableHeight) {
+          result.push(currentPage);
+          currentPage = [];
+          usedH = 0;
+        }
+
+        let space = availableHeight - usedH - headerH;
+        if (space < 1 && currentPage.length > 0) {
+          result.push(currentPage);
+          currentPage = [];
+          usedH = 0;
+          space = availableHeight - headerH;
+        }
+
+        const withNameNow = firstFragOfMsg && nameOnFirst;
+        const splitHeightBudget = Math.max(1, space - splitVerticalBuffer);
+        const prefixLen = longestFittingPrefixPreview(
+          containerWidth,
+          fontSize,
+          lineHeight,
+          messageGap,
+          remainder,
+          splitHeightBudget,
+          withNameNow
+        );
+
+        let takeEnd = snapUtf16PrefixEnd(remainder, prefixLen);
+        let prefix = remainder.slice(0, takeEnd);
+        if (!prefix.length) {
+          takeEnd = snapUtf16PrefixEnd(remainder, 1);
+          prefix = remainder.slice(0, Math.max(1, takeEnd));
+        }
+
+        const isLastPart = prefix.length >= remainder.length;
+        const fragH = estimateTextSliceHeightPreview(
+          containerWidth,
+          fontSize,
+          lineHeight,
+          prefix,
+          withNameNow,
+          messageGap
+        );
+
+        const pageBottomBudget = availableHeight - splitVerticalBuffer;
+        if (currentPage.length > 0 && usedH + headerH + fragH > pageBottomBudget) {
+          result.push(currentPage);
+          currentPage = [];
+          usedH = 0;
+          continue;
+        }
+
+        const fragKey = `${String(baseMsg._id)}-frag-${splitFragCounter++}`;
+        currentPage.push({
+          ...baseMsg,
+          text: prefix,
+          __suppressTimeRow: !isLastPart,
+          __splitFragKey: fragKey,
+        });
+        usedH += headerH + fragH;
+        remainder = remainder.slice(prefix.length);
+        firstFragOfMsg = false;
+
+        if (dateFormat === 'full' && isLastPart) {
+          const msgDateStr = baseMsg.date || baseMsg.sendingTime || '';
+          const ym = getYearMonth(msgDateStr);
+          const formattedDate = formatDate(msgDateStr, dateStyle, dateLanguage);
+          if (ym) { lastYear = ym.year; lastMonth = ym.month; }
+          if (formattedDate) lastDate = formattedDate;
+        }
       }
     }
 
@@ -1080,8 +1311,8 @@ export const BookPreviewPages: React.FC<BookPreviewPagesProps> = ({
                       backgroundColor: imageOnly
                         ? 'transparent'
                         : isSender
-                        ? colors.senderBubble || '#dcf8c6'
-                        : colors.receiverBubble || '#ffffff',
+                        ? colors.senderBubble || '#005C4B'
+                        : colors.receiverBubble || '#2A3942',
                       borderTopLeftRadius: 10,
                       borderTopRightRadius: 10,
                       borderBottomLeftRadius: isSender ? 10 : 2,
@@ -1104,7 +1335,9 @@ export const BookPreviewPages: React.FC<BookPreviewPagesProps> = ({
                       style={[
                         styles.senderName,
                         {
-                          color: isSender ? colors.senderText : colors.receiverText,
+                          color: isSender
+                            ? colors.senderText || '#FFFFFF'
+                            : colors.receiverText || '#FFFFFF',
                           fontSize: fontSize - 1,
                         },
                       ]}
@@ -1118,7 +1351,9 @@ export const BookPreviewPages: React.FC<BookPreviewPagesProps> = ({
                       style={[
                         styles.messageText,
                         {
-                          color: isSender ? colors.senderText : colors.receiverText,
+                          color: isSender
+                            ? colors.senderText || '#FFFFFF'
+                            : colors.receiverText || '#FFFFFF',
                           fontSize,
                           lineHeight: fontSize * lineHeight,
                           fontFamily,
@@ -1172,20 +1407,22 @@ export const BookPreviewPages: React.FC<BookPreviewPagesProps> = ({
                             <Text style={{ fontSize: 9, color: '#999', marginTop: 4, textAlign: 'center' }}>QR pending</Text>
                           </View>
                         )}
-                        <Text style={[styles.qrLabel, { fontSize: Math.max(8, fontSize - 2), color: isSender ? colors.senderText || '#000' : colors.receiverText || '#000' }]}>
+                        <Text style={[styles.qrLabel, { fontSize: Math.max(8, fontSize - 2), color: isSender ? colors.senderText || '#FFFFFF' : colors.receiverText || '#FFFFFF' }]}>
                           {isVideo ? 'Scan to watch video' : 'Scan to listen'}
                         </Text>
                       </View>
                     </View>
                   ) : null}
-                  {timeContent ? (
+                  {timeContent && !msg.__suppressTimeRow ? (
                     <View style={styles.messageTimeRow}>
                       <Text style={styles.messageTimeSpacer} />
                       <Text
                         style={[
                           styles.messageTime,
                           {
-                            color: isSender ? colors.senderText : colors.receiverText,
+                            color: isSender
+                              ? colors.senderText || '#FFFFFF'
+                              : colors.receiverText || '#FFFFFF',
                             fontSize: fontSize - 2,
                           },
                         ]}
@@ -1209,7 +1446,7 @@ export const BookPreviewPages: React.FC<BookPreviewPagesProps> = ({
                 {
                   width: containerWidth,
                   height: pageHeight,
-                  backgroundColor: colors.background || '#e5ddd5',
+                  backgroundColor: colors.background || '#ECE5DD',
                   paddingHorizontal: 12,
                   paddingVertical: 16,
                   paddingBottom: 24, // extra bottom room so last message never touches the edge
@@ -1224,7 +1461,14 @@ export const BookPreviewPages: React.FC<BookPreviewPagesProps> = ({
                 <Text
                   style={[
                     styles.pageNumber,
-                    { color: colors.text || '#1a1a1a', fontSize: 9, position: 'absolute', bottom: 8, left: 0, right: 0 },
+                    {
+                      color: '#000000',
+                      fontSize: 9,
+                      position: 'absolute',
+                      bottom: 8,
+                      left: 0,
+                      right: 0,
+                    },
                   ]}
                 >
                   {pageIndex + 1} / {totalPreviewPages}
@@ -1343,7 +1587,6 @@ const styles = StyleSheet.create({
   pageNumber: {
     textAlign: 'center',
     marginTop: 8,
-    opacity: 0.6,
   },
   dateHeader: {
     alignItems: 'center',

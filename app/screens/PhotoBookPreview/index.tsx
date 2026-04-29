@@ -76,6 +76,8 @@ const PhotoBookPreview: React.FC<PhotoBookPreviewProps> = ({
   const [previewAreaWidth, setPreviewAreaWidth] = useState<number>(0);
   const [titleEditorVisible, setTitleEditorVisible] = useState(false);
   const [themeUpdateRequested, setThemeUpdateRequested] = useState(false);
+  // NEW: Selected books for ordering (Set of bookNumbers). Empty = all selected by default.
+  const [selectedBooks, setSelectedBooks] = useState<Set<number>>(new Set());
   
   // NEW: Multi-book support
   const [currentBookNumber, setCurrentBookNumber] = useState(1);
@@ -449,6 +451,8 @@ const PhotoBookPreview: React.FC<PhotoBookPreviewProps> = ({
       setTotalBooks(booksToUpload.length);
     } else if (photoBook?.books && photoBook.books.length > 0) {
       setTotalBooks(photoBook.books.length);
+      // Default: all books selected
+      setSelectedBooks(new Set(photoBook.books.map((b: any) => b.bookNumber)));
     } else {
       setTotalBooks(1);
     }
@@ -533,6 +537,22 @@ const PhotoBookPreview: React.FC<PhotoBookPreviewProps> = ({
       hitsPageTierCap,
     };
   }, [booksToUpload, photoBook, pageCount, format]);
+
+  /** Pricing breakdown filtered to only the books the user has selected for ordering. */
+  const selectedPricingBreakdown = React.useMemo(() => {
+    if (!pricingBreakdown.multiBook || selectedBooks.size === 0) {
+      return pricingBreakdown;
+    }
+    const selectedRows = pricingBreakdown.rows.filter(r => selectedBooks.has(r.bookNumber));
+    const totalPages = selectedRows.reduce((s, r) => s + r.pages, 0);
+    const totalPrice = selectedRows.reduce((s, r) => s + r.price, 0);
+    return {
+      ...pricingBreakdown,
+      rows: selectedRows,
+      totalPages,
+      totalPriceFormatted: totalPrice.toFixed(2),
+    };
+  }, [pricingBreakdown, selectedBooks]);
 
   // NEW: Filter messages for current book
   const currentBookMessages = React.useMemo(() => {
@@ -992,19 +1012,57 @@ const PhotoBookPreview: React.FC<PhotoBookPreviewProps> = ({
     }
   };
 
+  // NEW: Toggle a book's selection for ordering
+  const toggleBookSelection = useCallback((bookNumber: number) => {
+    setSelectedBooks(prev => {
+      const next = new Set(prev);
+      if (next.has(bookNumber)) {
+        next.delete(bookNumber);
+      } else {
+        next.add(bookNumber);
+      }
+      return next;
+    });
+  }, []);
+
   const handleCreateOrder = async () => {
     if (!currentAddress) {
       Alert.alert('Error', 'Please select a shipping address first');
       navigation.navigate('Addresses');
       return;
     }
-    // Check for PDF - works for both single and multi-book
-    const hasPdf = photoBook?.generatedPdfUrl || 
-      (photoBook?.books && photoBook.books.some((b: any) => b.generatedPdfUrl));
-    if (!hasPdf) {
-      Alert.alert('Error', 'Please generate PDF first');
+
+    // For multi-book: validate at least one book is selected
+    const isMultiBook = photoBook?.books && photoBook.books.length > 0;
+    if (isMultiBook && selectedBooks.size === 0) {
+      Alert.alert('No Books Selected', 'Please select at least one book to order.');
       return;
     }
+
+    // Determine which books are being ordered
+    const selectedBookNumbers = isMultiBook
+      ? Array.from(selectedBooks).sort((a, b) => a - b)
+      : [];
+
+    // Check for PDF — only for selected books (or single book)
+    if (isMultiBook) {
+      const missingPdf = photoBook!.books!.filter(
+        (b: any) => selectedBooks.has(b.bookNumber) && !b.generatedPdfUrl
+      );
+      if (missingPdf.length > 0) {
+        Alert.alert(
+          'PDF Missing',
+          `Please generate PDFs for: Book ${missingPdf.map((b: any) => b.bookNumber).join(', ')}`
+        );
+        return;
+      }
+    } else {
+      if (!photoBook?.generatedPdfUrl) {
+        Alert.alert('Error', 'Please generate PDF first');
+        return;
+      }
+    }
+
     setOrdering(true);
     try {
       const shippingAddress = {
@@ -1016,7 +1074,12 @@ const PhotoBookPreview: React.FC<PhotoBookPreviewProps> = ({
         country: currentAddress.country,
         phoneNumber: currentAddress.phone_no,
       };
-      const response = await createGelatoOrder(photoBook?._id || photoBookId, shippingAddress);
+      const response = await createGelatoOrder(
+        photoBook?._id || photoBookId,
+        shippingAddress,
+        undefined,
+        selectedBookNumbers.length > 0 ? selectedBookNumbers : undefined
+      );
       const orderData = response.data?.data ?? response.data;
       const orderId =
         orderData?.orderId ||
@@ -1481,54 +1544,148 @@ const PhotoBookPreview: React.FC<PhotoBookPreviewProps> = ({
           />
         )}
         {photoBook?.books && photoBook.books.length > 0 && pdfGenerated ? (
-          // Multi-book: Show per-book status
+          // Multi-book: Show per-book status with selection checkboxes
           <>
+            <View style={styles.bookSelectionHeader}>
+              <Text style={styles.bookSelectionTitle}>Select books to order:</Text>
+              <TouchableOpacity
+                onPress={() => {
+                  const allNums = photoBook.books!
+                    .filter((b: any) => !!b.generatedPdfUrl)
+                    .map((b: any) => b.bookNumber);
+                  if (selectedBooks.size === allNums.length) {
+                    setSelectedBooks(new Set());
+                  } else {
+                    setSelectedBooks(new Set(allNums));
+                  }
+                }}
+              >
+                <Text style={styles.bookSelectionToggleAll}>
+                  {selectedBooks.size === photoBook.books.filter((b: any) => !!b.generatedPdfUrl).length
+                    ? 'Deselect All'
+                    : 'Select All'}
+                </Text>
+              </TouchableOpacity>
+            </View>
             <View style={styles.pdfButtonsContainer}>
               {photoBook.books.map((book: any) => {
                 const status = bookPdfStatus[book.bookNumber] || book.status || 'pending';
                 const isGenerating = status === 'generating';
                 const isCompleted = status === 'completed' && book.generatedPdfUrl;
                 const isFailed = status === 'failed';
-                const isPending = status === 'pending';
+                const isChecked = selectedBooks.has(book.bookNumber);
+                const canSelect = !!book.generatedPdfUrl;
 
                 return (
                   <View key={book.bookNumber} style={styles.bookPdfRow}>
-                    {isCompleted ? (
-                      <TouchableOpacity
-                        style={styles.viewPdfButton}
-                        onPress={() => Linking.openURL(book.generatedPdfUrl).catch(() => Alert.alert('Error', 'Could not open PDF'))}
-                      >
-                        <Text style={styles.viewPdfButtonText}>📄 View Book {book.bookNumber} PDF</Text>
-                      </TouchableOpacity>
-                    ) : isGenerating ? (
-                      <View style={styles.bookPdfStatusRow}>
-                        <ActivityIndicator size="small" color={COLORS.lightBlue} />
-                        <Text style={styles.bookPdfStatusText}>Book {book.bookNumber} — Generating PDF...</Text>
-                      </View>
-                    ) : isFailed ? (
-                      <View style={styles.bookPdfStatusRow}>
-                        <Text style={styles.bookPdfFailedText}>❌ Book {book.bookNumber} — Failed</Text>
-                        <TouchableOpacity style={styles.retryPdfButton} onPress={handleGeneratePdf}>
-                          <Text style={styles.retryPdfButtonText}>Retry</Text>
+                    <View style={styles.bookPdfRowInner}>
+                      {/* Checkbox — only shown when PDF is ready */}
+                      {canSelect ? (
+                        <TouchableOpacity
+                          style={[styles.checkbox, isChecked && styles.checkboxChecked]}
+                          onPress={() => toggleBookSelection(book.bookNumber)}
+                          accessibilityRole="checkbox"
+                          accessibilityState={{ checked: isChecked }}
+                          accessibilityLabel={`Select Book ${book.bookNumber} for ordering`}
+                        >
+                          {isChecked && <Text style={styles.checkboxTick}>✓</Text>}
                         </TouchableOpacity>
+                      ) : (
+                        <View style={[styles.checkbox, styles.checkboxDisabled]} />
+                      )}
+
+                      {/* Book info + PDF link */}
+                      <View style={styles.bookPdfInfo}>
+                        {isCompleted ? (
+                          <TouchableOpacity
+                            onPress={() =>
+                              Linking.openURL(book.generatedPdfUrl).catch(() =>
+                                Alert.alert('Error', 'Could not open PDF')
+                              )
+                            }
+                          >
+                            <Text style={styles.viewPdfButtonText}>
+                              📄 Book {book.bookNumber} — View PDF
+                            </Text>
+                          </TouchableOpacity>
+                        ) : isGenerating ? (
+                          <View style={styles.bookPdfStatusRow}>
+                            <ActivityIndicator size="small" color={COLORS.lightBlue} />
+                            <Text style={styles.bookPdfStatusText}>
+                              Book {book.bookNumber} — Generating PDF...
+                            </Text>
+                          </View>
+                        ) : isFailed ? (
+                          <View style={styles.bookPdfStatusRow}>
+                            <Text style={styles.bookPdfFailedText}>
+                              ❌ Book {book.bookNumber} — Failed
+                            </Text>
+                            <TouchableOpacity
+                              style={styles.retryPdfButton}
+                              onPress={handleGeneratePdf}
+                            >
+                              <Text style={styles.retryPdfButtonText}>Retry</Text>
+                            </TouchableOpacity>
+                          </View>
+                        ) : (
+                          <View style={styles.bookPdfStatusRow}>
+                            <ActivityIndicator size="small" color={COLORS.lightBlue} />
+                            <Text style={styles.bookPdfStatusText}>
+                              Book {book.bookNumber} — Waiting...
+                            </Text>
+                          </View>
+                        )}
+                        {/* Per-book price hint */}
+                        {canSelect && (
+                          <Text style={styles.bookPdfPriceHint}>
+                            {book.estimatedPages} pages ·{' '}
+                            ${pricingBreakdown.rows.find(r => r.bookNumber === book.bookNumber)?.price.toFixed(2) ?? '—'}
+                          </Text>
+                        )}
                       </View>
-                    ) : (
-                      <View style={styles.bookPdfStatusRow}>
-                        <ActivityIndicator size="small" color={COLORS.lightBlue} />
-                        <Text style={styles.bookPdfStatusText}>Book {book.bookNumber} — Waiting...</Text>
-                      </View>
-                    )}
+                    </View>
                   </View>
                 );
               })}
             </View>
-            {photoBook.books.every((b: any) => b.generatedPdfUrl) && (
-              <CustomButton
-                text={ordering ? 'Creating Order…' : 'Create Order (All Books)'}
-                onPress={handleCreateOrder}
-                animating={ordering}
-              />
+
+            {/* Selected price summary */}
+            {selectedBooks.size > 0 && (
+              <View style={styles.selectedSummaryBox}>
+                <Text style={styles.selectedSummaryText}>
+                  {selectedBooks.size} book{selectedBooks.size > 1 ? 's' : ''} selected ·{' '}
+                  <Text style={styles.selectedSummaryPrice}>
+                    ${selectedPricingBreakdown.totalPriceFormatted}
+                  </Text>
+                </Text>
+              </View>
             )}
+
+            {/* Order button — disabled until all selected books have PDFs */}
+            {(() => {
+              const selectedWithoutPdf = photoBook.books.filter(
+                (b: any) => selectedBooks.has(b.bookNumber) && !b.generatedPdfUrl
+              );
+              const waitingForPdf = selectedBooks.size > 0 && selectedWithoutPdf.length > 0;
+              const isDisabled = ordering || selectedBooks.size === 0 || waitingForPdf;
+              const buttonText = ordering
+                ? 'Creating Order...'
+                : selectedBooks.size === 0
+                ? 'Select books to order'
+                : waitingForPdf
+                ? `Waiting for PDF - Book ${selectedWithoutPdf.map((b: any) => b.bookNumber).join(', ')}`
+                : selectedBooks.size === photoBook.books.length
+                ? `Order All ${selectedBooks.size} Books - $${selectedPricingBreakdown.totalPriceFormatted}`
+                : `Order ${selectedBooks.size} Book${selectedBooks.size > 1 ? 's' : ''} - $${selectedPricingBreakdown.totalPriceFormatted}`;
+              return (
+                <CustomButton
+                  text={buttonText}
+                  onPress={handleCreateOrder}
+                  animating={ordering}
+                  disable={isDisabled}
+                />
+              );
+            })()}
           </>
         ) : photoBook?.generatedPdfUrl ? (
           // Single book: Show single button
@@ -1543,7 +1700,7 @@ const PhotoBookPreview: React.FC<PhotoBookPreviewProps> = ({
               <Text style={styles.viewPdfButtonText}>View PDF</Text>
             </TouchableOpacity>
             <CustomButton
-              text={ordering ? 'Creating Order…' : 'Create Order'}
+              text={ordering ? 'Creating Order...' : 'Create Order'}
               onPress={handleCreateOrder}
               animating={ordering}
             />
@@ -2040,6 +2197,90 @@ const styles = StyleSheet.create({
     fontSize: rfs(11),
     fontFamily: fonts.POPPINS.SemiBold,
     color: COLORS.white2,
+  },
+  // NEW: Book selection for ordering
+  bookSelectionHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: hp(1.5),
+    paddingHorizontal: wp(1),
+  },
+  bookSelectionTitle: {
+    fontSize: rfs(15),
+    fontFamily: fonts.POPPINS.SemiBold,
+    color: COLORS.textBlack,
+  },
+  bookSelectionToggleAll: {
+    fontSize: rfs(13),
+    fontFamily: fonts.POPPINS.SemiBold,
+    color: COLORS.lightBlue,
+  },
+  bookPdfRowInner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: wp(3),
+    paddingVertical: hp(1),
+    paddingHorizontal: wp(3),
+    backgroundColor: COLORS.white2,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: COLORS.lightGray,
+    marginBottom: hp(1),
+  },
+  bookPdfInfo: {
+    flex: 1,
+  },
+  bookPdfPriceHint: {
+    fontSize: rfs(11),
+    fontFamily: fonts.POPPINS.Regular,
+    color: COLORS.textGray,
+    marginTop: hp(0.3),
+  },
+  checkbox: {
+    width: wp(6),
+    height: wp(6),
+    borderRadius: wp(1.5),
+    borderWidth: 2,
+    borderColor: COLORS.lightBlue,
+    backgroundColor: COLORS.white2,
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexShrink: 0,
+  },
+  checkboxChecked: {
+    backgroundColor: COLORS.lightBlue,
+    borderColor: COLORS.lightBlue,
+  },
+  checkboxDisabled: {
+    borderColor: COLORS.lightGray,
+    backgroundColor: COLORS.lightGray,
+    opacity: 0.5,
+  },
+  checkboxTick: {
+    color: COLORS.white2,
+    fontSize: rfs(13),
+    fontFamily: fonts.POPPINS.Bold,
+    lineHeight: rfs(16),
+  },
+  selectedSummaryBox: {
+    backgroundColor: '#E3F2FD',
+    borderRadius: wp(2),
+    paddingVertical: hp(1.2),
+    paddingHorizontal: wp(4),
+    marginBottom: hp(1.5),
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: COLORS.lightBlue,
+  },
+  selectedSummaryText: {
+    fontSize: rfs(14),
+    fontFamily: fonts.POPPINS.Regular,
+    color: COLORS.textBlack,
+  },
+  selectedSummaryPrice: {
+    fontFamily: fonts.POPPINS.Bold,
+    color: COLORS.lightBlue,
   },
 });
 

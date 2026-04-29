@@ -87,16 +87,19 @@ export function generatePhotoBookPdf(
 }
 
 /**
- * Create Gelato order from photo book
+ * Create Gelato order from photo book.
+ * @param selectedBookNumbers - Optional array of book numbers to order. If omitted, all books are ordered.
  */
 export function createGelatoOrder(
   photoBookId: string,
   shippingAddress: any,
-  returnAddress?: any
+  returnAddress?: any,
+  selectedBookNumbers?: number[]
 ): Promise<AxiosResponse<{ status: string; data: { gelatoOrder: GelatoOrder; previewUrl?: string; orderId: string } }>> {
   return apiClient.post(`photobooks/${photoBookId}/order`, {
     shippingAddress,
     returnAddress,
+    ...(selectedBookNumbers && selectedBookNumbers.length > 0 ? { selectedBookNumbers } : {}),
   });
 }
 

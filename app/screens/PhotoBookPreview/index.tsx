@@ -78,6 +78,8 @@ const PhotoBookPreview: React.FC<PhotoBookPreviewProps> = ({
   
   // NEW: Multi-book support
   const [currentBookNumber, setCurrentBookNumber] = useState(1);
+  const deferredBookNumber = React.useDeferredValue(currentBookNumber);
+  const lastBookTapAtRef = React.useRef<number | null>(null);
   const [totalBooks, setTotalBooks] = useState(1);
 
   const token = useAppSelector((state: any) => state?.user?.token);
@@ -85,8 +87,11 @@ const PhotoBookPreview: React.FC<PhotoBookPreviewProps> = ({
   const currentAddress = useAppSelector(
     (state: any) => state?.user?.currentAddress
   );
+  // Use photoBookId if available, fall back to chatId so theme changes work
+  // even before a photobook is created (needsCalculation mode).
+  const themeProjectKey = photoBookId ?? chatId ?? '__default__';
   const themeConfigState = useAppSelector((state: any) =>
-    photoBookId ? state?.themeConfig?.byPhotoBookId?.[photoBookId] : null
+    state?.themeConfig?.byPhotoBookId?.[themeProjectKey] ?? null
   );
   const savingTheme = useAppSelector(
     (state: any) => state?.themeConfig?.savingPhotoBookId
@@ -410,7 +415,26 @@ const PhotoBookPreview: React.FC<PhotoBookPreviewProps> = ({
 
   const themeId = themeConfigState?.themeId ?? 'classic';
   const overrides = themeConfigState?.overrides ?? {};
-  const resolvedConfig = resolveThemeConfig(themeId, overrides);
+  const resolvedConfig = React.useMemo(
+    () => resolveThemeConfig(themeId, overrides),
+    [themeId, overrides],
+  );
+  const classicDefaults = React.useMemo(() => getTheme('classic').defaults, []);
+  const normalizedPreviewConfig = React.useMemo(
+    () => ({
+      ...resolvedConfig,
+      // Keep preview geometry consistent across themes (classic baseline),
+      // unless user explicitly changes size from options.
+      fontSize:
+        overrides.fontSize !== undefined
+          ? overrides.fontSize
+          : classicDefaults.fontSize,
+      lineHeight: classicDefaults.lineHeight,
+    }),
+    [resolvedConfig, overrides.fontSize, classicDefaults.fontSize, classicDefaults.lineHeight],
+  );
+  const deferredPreviewConfig = React.useDeferredValue(normalizedPreviewConfig);
+  const isThemeOptionsPending = deferredPreviewConfig !== normalizedPreviewConfig;
 
   // NEW: Load books metadata from photoBook OR booksToUpload
   useEffect(() => {
@@ -507,19 +531,19 @@ const PhotoBookPreview: React.FC<PhotoBookPreviewProps> = ({
   const currentBookMessages = React.useMemo(() => {
     // Before upload: use calculated books
     if (booksToUpload && booksToUpload.length > 0) {
-      const book = booksToUpload.find((b: any) => b.bookNumber === currentBookNumber);
+      const book = booksToUpload.find((b: any) => b.bookNumber === deferredBookNumber);
       if (book) return book.messages;
     }
     
     // After upload (in-session): use enriched books with qrUrl/thumbnailUrl
     if (enrichedBooks && enrichedBooks.length > 0) {
-      const book = enrichedBooks.find((b: any) => b.bookNumber === currentBookNumber);
+      const book = enrichedBooks.find((b: any) => b.bookNumber === deferredBookNumber);
       if (book) return book.messages;
     }
 
     // Draft mode: use recalculated books
     if (draftBooks && draftBooks.length > 0) {
-      const book = draftBooks.find((b: any) => b.bookNumber === currentBookNumber);
+      const book = draftBooks.find((b: any) => b.bookNumber === deferredBookNumber);
       if (book) return book.messages;
     }
     
@@ -534,12 +558,21 @@ const PhotoBookPreview: React.FC<PhotoBookPreviewProps> = ({
     }
     
     return messages;
-  }, [messages, photoBook, currentBookNumber, bookMessages, booksToUpload, enrichedBooks, draftBooks, isDraftRecalculating]);
+  }, [messages, photoBook, deferredBookNumber, bookMessages, booksToUpload, enrichedBooks, draftBooks, isDraftRecalculating]);
+  const isBookSwitchPending = deferredBookNumber !== currentBookNumber;
 
   // Add console logs for page calculation comparison
   React.useEffect(() => {
     // Page calculation comparison for debugging - removed logs
   }, [currentBookMessages, currentBookNumber, pageCount, photoBook]);
+
+  React.useEffect(() => {
+    if (!__DEV__) return;
+    const tappedAt = lastBookTapAtRef.current;
+    if (!tappedAt) return;
+    const elapsed = Date.now() - tappedAt;
+    console.log(`[BookSwitch] active tab updated -> Book ${currentBookNumber} in ${elapsed}ms`);
+  }, [currentBookNumber]);
 
   const loadPhotoBook = useCallback(async () => {
     if (!photoBookId) {
@@ -702,13 +735,13 @@ const PhotoBookPreview: React.FC<PhotoBookPreviewProps> = ({
   }, [photoBook, messages, needsCalculation, isDraftRecalculating, draftBooks]);
 
   const handleSelectTheme = (id: string) => {
-    dispatch(setThemeConfigForProject({ photoBookId, themeId: id, overrides }));
+    dispatch(setThemeConfigForProject({ photoBookId: themeProjectKey, themeId: id, overrides }));
   };
 
   const handleDateFormat = (v: 'full' | 'timeOnly' | 'hidden') => {
     dispatch(
       setThemeConfigForProject({
-        photoBookId,
+        photoBookId: themeProjectKey,
         themeId,
         overrides: { ...overrides, dateFormat: v },
       })
@@ -717,7 +750,7 @@ const PhotoBookPreview: React.FC<PhotoBookPreviewProps> = ({
   const handleShowPageNumbers = (v: boolean) => {
     dispatch(
       setThemeConfigForProject({
-        photoBookId,
+        photoBookId: themeProjectKey,
         themeId,
         overrides: { ...overrides, showPageNumbers: v },
       })
@@ -726,7 +759,7 @@ const PhotoBookPreview: React.FC<PhotoBookPreviewProps> = ({
   const handleSenderLabelStyle = (v: 'name' | 'initial' | 'hidden') => {
     dispatch(
       setThemeConfigForProject({
-        photoBookId,
+        photoBookId: themeProjectKey,
         themeId,
         overrides: { ...overrides, senderLabelStyle: v },
       })
@@ -735,7 +768,7 @@ const PhotoBookPreview: React.FC<PhotoBookPreviewProps> = ({
   const handleFontFamily = (v: string) => {
     dispatch(
       setThemeConfigForProject({
-        photoBookId,
+        photoBookId: themeProjectKey,
         themeId,
         overrides: { ...overrides, fontFamily: v },
       })
@@ -744,7 +777,7 @@ const PhotoBookPreview: React.FC<PhotoBookPreviewProps> = ({
   const handleFontSize = (v: number) => {
     dispatch(
       setThemeConfigForProject({
-        photoBookId,
+        photoBookId: themeProjectKey,
         themeId,
         overrides: { ...overrides, fontSize: v },
       })
@@ -753,7 +786,7 @@ const PhotoBookPreview: React.FC<PhotoBookPreviewProps> = ({
   const handleMessageBold = (v: boolean) => {
     dispatch(
       setThemeConfigForProject({
-        photoBookId,
+        photoBookId: themeProjectKey,
         themeId,
         overrides: { ...overrides, messageBold: v },
       })
@@ -762,7 +795,7 @@ const PhotoBookPreview: React.FC<PhotoBookPreviewProps> = ({
   const handleMessageItalic = (v: boolean) => {
     dispatch(
       setThemeConfigForProject({
-        photoBookId,
+        photoBookId: themeProjectKey,
         themeId,
         overrides: { ...overrides, messageItalic: v },
       })
@@ -771,7 +804,7 @@ const PhotoBookPreview: React.FC<PhotoBookPreviewProps> = ({
   const handleImageLayout = (v: 'fullPage' | 'grid' | 'maxGrid') => {
     dispatch(
       setThemeConfigForProject({
-        photoBookId,
+        photoBookId: themeProjectKey,
         themeId,
         overrides: { ...overrides, imageLayout: v },
       })
@@ -780,7 +813,7 @@ const PhotoBookPreview: React.FC<PhotoBookPreviewProps> = ({
   const handleDateStyle = (v: 'short' | 'long' | 'dayName') => {
     dispatch(
       setThemeConfigForProject({
-        photoBookId,
+        photoBookId: themeProjectKey,
         themeId,
         overrides: { ...overrides, dateStyle: v },
       })
@@ -789,7 +822,7 @@ const PhotoBookPreview: React.FC<PhotoBookPreviewProps> = ({
   const handleDateLanguage = (v: 'en' | 'fr' | 'es') => {
     dispatch(
       setThemeConfigForProject({
-        photoBookId,
+        photoBookId: themeProjectKey,
         themeId,
         overrides: { ...overrides, dateLanguage: v },
       })
@@ -845,7 +878,7 @@ const PhotoBookPreview: React.FC<PhotoBookPreviewProps> = ({
   const handleSaveTitles = (customTitles: any) => {
     dispatch(
       setThemeConfigForProject({
-        photoBookId,
+        photoBookId: themeProjectKey,
         themeId,
         overrides: { ...overrides, customTitles },
       })
@@ -1040,6 +1073,10 @@ const PhotoBookPreview: React.FC<PhotoBookPreviewProps> = ({
                             currentBookNumber === bookNum && styles.bookButtonActive,
                           ]}
                           onPress={() => {
+                            if (__DEV__) {
+                              lastBookTapAtRef.current = Date.now();
+                              console.log(`[BookSwitch] press -> Book ${bookNum}`);
+                            }
                             setCurrentBookNumber(bookNum);
                           }}
                         >
@@ -1156,12 +1193,12 @@ const PhotoBookPreview: React.FC<PhotoBookPreviewProps> = ({
                         let finalPageCount = pageCount || photoBook?.pageCount || 30;
                         
                         if (booksToUpload && booksToUpload.length > 0) {
-                          const currentBook = booksToUpload.find((b: any) => b.bookNumber === currentBookNumber);
+                          const currentBook = booksToUpload.find((b: any) => b.bookNumber === deferredBookNumber);
                           if (currentBook && currentBook.actualPages) {
                             finalPageCount = currentBook.actualPages;
                           }
                         } else if (photoBook?.books && photoBook.books.length > 0) {
-                          const currentBook = photoBook.books.find((b: any) => b.bookNumber === currentBookNumber);
+                          const currentBook = photoBook.books.find((b: any) => b.bookNumber === deferredBookNumber);
                           if (currentBook && currentBook.estimatedPages) {
                             finalPageCount = currentBook.estimatedPages;
                           }
@@ -1169,34 +1206,50 @@ const PhotoBookPreview: React.FC<PhotoBookPreviewProps> = ({
                         
                         return null;
                       })()}
-                      <BookPreviewPages
-                        messages={isDraftRecalculating ? messages : currentBookMessages}
-                        pageCount={(() => {
-                          // 🔥 NEW: Use booksToUpload actualPages if available
-                          if (booksToUpload && booksToUpload.length > 0) {
-                            const currentBook = booksToUpload.find((b: any) => b.bookNumber === currentBookNumber);
-                            if (currentBook && currentBook.actualPages) {
-                              return currentBook.actualPages;
+                      {isBookSwitchPending ? (
+                        <View style={styles.emptyPreview}>
+                          <ActivityIndicator size="small" color={COLORS.lightBlue} />
+                          <Text style={styles.emptyText}>Switching to Book {currentBookNumber}...</Text>
+                        </View>
+                      ) : (
+                        <>
+                          {isThemeOptionsPending && (
+                            <View style={styles.previewUpdatingRow}>
+                              <ActivityIndicator size="small" color={COLORS.lightBlue} />
+                              <Text style={styles.previewUpdatingText}>Applying theme changes...</Text>
+                            </View>
+                          )}
+                          <BookPreviewPages
+                            key={`book-preview-${deferredBookNumber}`}
+                            messages={isDraftRecalculating ? messages : currentBookMessages}
+                            pageCount={(() => {
+                              // 🔥 NEW: Use booksToUpload actualPages if available
+                              if (booksToUpload && booksToUpload.length > 0) {
+                                const currentBook = booksToUpload.find((b: any) => b.bookNumber === deferredBookNumber);
+                                if (currentBook && currentBook.actualPages) {
+                                  return currentBook.actualPages;
+                                }
+                              }
+                              
+                              // For multi-book: use book's estimatedPages, for single book: use pageCount
+                              if (photoBook?.books && photoBook.books.length > 0) {
+                                const currentBook = photoBook.books.find((b: any) => b.bookNumber === deferredBookNumber);
+                                if (currentBook && currentBook.estimatedPages) {
+                                  return currentBook.estimatedPages;
+                                }
+                              }
+                              return pageCount || photoBook?.pageCount || 30;
+                            })()}
+                            resolvedConfig={deferredPreviewConfig}
+                            containerWidth={Math.max(containerWidth, 300)}
+                            format={format || photoBook?.format || 'standard_14_8x21'}
+                            onPagesCalculated={
+                              isDraftRecalculating ? handleDraftPagesCalculated :
+                              (isCalculating && !booksToUpload ? handlePagesCalculated : undefined)
                             }
-                          }
-                          
-                          // For multi-book: use book's estimatedPages, for single book: use pageCount
-                          if (photoBook?.books && photoBook.books.length > 0) {
-                            const currentBook = photoBook.books.find((b: any) => b.bookNumber === currentBookNumber);
-                            if (currentBook && currentBook.estimatedPages) {
-                              return currentBook.estimatedPages;
-                            }
-                          }
-                          return pageCount || photoBook?.pageCount || 30;
-                        })()}
-                        resolvedConfig={resolvedConfig}
-                        containerWidth={Math.max(containerWidth, 300)}
-                        format={format || photoBook?.format || 'standard_14_8x21'}
-                        onPagesCalculated={
-                          isDraftRecalculating ? handleDraftPagesCalculated :
-                          (isCalculating && !booksToUpload ? handlePagesCalculated : undefined)
-                        }
-                      />
+                          />
+                        </>
+                      )}
                     </>
                   ) : (
                     <View style={styles.emptyPreview}>
@@ -1586,6 +1639,17 @@ const styles = StyleSheet.create({
     fontSize: rfs(14),
     color: COLORS.textGray,
     marginTop: hp(1),
+  },
+  previewUpdatingRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    marginBottom: hp(1),
+  },
+  previewUpdatingText: {
+    fontSize: rfs(12),
+    color: COLORS.textGray,
   },
   previewImage: {
     width: '100%',

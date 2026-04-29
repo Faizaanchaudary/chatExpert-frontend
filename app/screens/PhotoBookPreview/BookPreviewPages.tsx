@@ -2,7 +2,7 @@
  * Preview pages renderer — WhatsApp-style layout.
  * Height-based pagination to match selected page dimensions. Text preserves newlines.
  */
-import React, { useMemo, useState, useRef, useCallback, useEffect } from 'react';
+import React, { useMemo, useState, useRef, useCallback, useEffect, useDeferredValue } from 'react';
 import { View, Text, StyleSheet, Image, InteractionManager, ActivityIndicator } from 'react-native';
 import { IMessage } from '../../interfaces/IMessage';
 import { ResolvedThemeConfig } from '../../themes/types';
@@ -460,7 +460,7 @@ interface BookPreviewPagesProps {
   onPagesCalculated?: (pages: IMessage[][]) => void;
 }
 
-export const BookPreviewPages: React.FC<BookPreviewPagesProps> = ({
+const BookPreviewPagesComponent: React.FC<BookPreviewPagesProps> = ({
   messages,
   resolvedConfig,
   containerWidth,
@@ -492,7 +492,9 @@ export const BookPreviewPages: React.FC<BookPreviewPagesProps> = ({
 
   // Filter system messages FIRST - same as backend PDF generation
   const filteredMessages = useMemo(() => filterSystemMessages(messages), [messages]);
-  const meName = useMemo(() => getMostFrequentSenderName(filteredMessages), [filteredMessages]);
+  const deferredMessages = useDeferredValue(filteredMessages);
+  const isDeferringMessages = deferredMessages !== filteredMessages;
+  const meName = useMemo(() => getMostFrequentSenderName(deferredMessages), [deferredMessages]);
 
   // msgHeights stores { withName, noName } for each message id
   const [msgHeights, setMsgHeights] = useState<Record<string, { withName: number; noName: number }>>({});
@@ -500,6 +502,8 @@ export const BookPreviewPages: React.FC<BookPreviewPagesProps> = ({
   const pendingRef = useRef<number>(0);
   const [paginationReady, setPaginationReady] = useState(false);
   const lastContainerWidthRef = useRef<number>(0);
+  const measurementInProgressRef = useRef<boolean>(false);
+  const lastMeasuredMessagesRef = useRef<IMessage[] | null>(null);
 
   const BATCH_SIZE = 150;
   const [renderedUpTo, setRenderedUpTo] = useState(0);
@@ -507,22 +511,32 @@ export const BookPreviewPages: React.FC<BookPreviewPagesProps> = ({
   const renderedUpToRef = useRef(0);
   useEffect(() => { renderedUpToRef.current = renderedUpTo; }, [renderedUpTo]);
 
-  const messageKey = filteredMessages.map(m => String(m._id)).join(',');
   useEffect(() => {
     if (containerWidth <= 0) return;
 
+    const messagesChanged = lastMeasuredMessagesRef.current !== deferredMessages;
+    if (messagesChanged) {
+      // New selected book/messages: allow a fresh pass even if a previous one was in progress.
+      measurementInProgressRef.current = false;
+    }
+
+    // Prevent duplicate restart for the same input while measurement is already running
+    if (measurementInProgressRef.current) return;
+
     const widthDiff = Math.abs(containerWidth - lastContainerWidthRef.current);
-    if (lastContainerWidthRef.current > 0 && widthDiff < 1) {
+    if (!messagesChanged && lastContainerWidthRef.current > 0 && widthDiff < 1) {
       return;
     }
 
     lastContainerWidthRef.current = containerWidth;
+    lastMeasuredMessagesRef.current = deferredMessages;
+    measurementInProgressRef.current = true;
 
     // Check global cache — already measured messages don't need re-rendering
     const cacheWidth = Math.round(containerWidth);
     const preloaded: Record<string, { withName: number; noName: number }> = {};
     const uncached: IMessage[] = [];
-    for (const msg of filteredMessages) {
+    for (const msg of deferredMessages) {
       const cacheKeyWith = `${msg._id}_${cacheWidth}_withName`;
       const cacheKeyNo   = `${msg._id}_${cacheWidth}_noName`;
       if (globalHeightCache[cacheKeyWith] !== undefined && globalHeightCache[cacheKeyNo] !== undefined) {
@@ -535,13 +549,13 @@ export const BookPreviewPages: React.FC<BookPreviewPagesProps> = ({
       }
     }
 
-
     if (uncached.length === 0) {
       measuredRef.current = preloaded;
       pendingRef.current = 0;
       setMsgHeights(preloaded);
       setPaginationReady(true);
       setRenderedUpTo(0);
+      measurementInProgressRef.current = false;
       return;
     }
 
@@ -553,10 +567,10 @@ export const BookPreviewPages: React.FC<BookPreviewPagesProps> = ({
     if (batchTimerRef.current) clearTimeout(batchTimerRef.current);
     setRenderedUpTo(0);
     InteractionManager.runAfterInteractions(() => {
-      setRenderedUpTo(Math.min(BATCH_SIZE, filteredMessages.length));
+      setRenderedUpTo(Math.min(BATCH_SIZE, deferredMessages.length));
     });
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [messageKey, containerWidth]);
+  }, [deferredMessages, containerWidth]);
 
   const onMsgLayout = useCallback((id: string, hWith: number, hNo: number) => {
     if (id in measuredRef.current) return;
@@ -571,11 +585,12 @@ export const BookPreviewPages: React.FC<BookPreviewPagesProps> = ({
     if (pendingRef.current === 0) {
       setMsgHeights({ ...measuredRef.current });
       setPaginationReady(true);
+      measurementInProgressRef.current = false;
     } else {
       const currentBatchEnd = renderedUpToRef.current;
       const currentBatchMeasured = Object.keys(measuredRef.current).length;
-      if (currentBatchMeasured >= currentBatchEnd && currentBatchEnd < filteredMessages.length) {
-        const nextEnd = Math.min(currentBatchEnd + BATCH_SIZE, filteredMessages.length);
+      if (currentBatchMeasured >= currentBatchEnd && currentBatchEnd < deferredMessages.length) {
+        const nextEnd = Math.min(currentBatchEnd + BATCH_SIZE, deferredMessages.length);
         if (batchTimerRef.current) clearTimeout(batchTimerRef.current);
         batchTimerRef.current = setTimeout(() => {
           InteractionManager.runAfterInteractions(() => {
@@ -584,7 +599,7 @@ export const BookPreviewPages: React.FC<BookPreviewPagesProps> = ({
         }, 50);
       }
     }
-  }, [filteredMessages.length]);
+  }, [deferredMessages.length]);
   
   // Group consecutive images from same sender
   const groupConsecutiveImages = (msgs: IMessage[]): (IMessage | IMessage[])[] => {
@@ -678,7 +693,7 @@ export const BookPreviewPages: React.FC<BookPreviewPagesProps> = ({
     let items: PaginationItem[];
 
     if (imageLayout === 'grid' || imageLayout === 'maxGrid') {
-      const grouped = groupConsecutiveImages(filteredMessages);
+      const grouped = groupConsecutiveImages(deferredMessages);
       const cols = imageLayout === 'maxGrid' ? 4 : 2;
       const imgSize = Math.round(containerWidth / cols);
       const overhead = 22; // time + padding
@@ -725,7 +740,7 @@ export const BookPreviewPages: React.FC<BookPreviewPagesProps> = ({
       // For non-grid layout, pick withName or noName height based on sender tracking
       let pItemLastSenderName: string | null = null;
       let pItemLastSenderSide: boolean | null = null;
-      items = filteredMessages.map(msg => {
+      items = deferredMessages.map(msg => {
         const isMedia = msg.messageType === 'image' || msg.messageType === 'video';
         const senderName = msg.senderName || null;
         const senderSide = isMessageFromMe(msg.senderName || '', meName);
@@ -819,6 +834,56 @@ export const BookPreviewPages: React.FC<BookPreviewPagesProps> = ({
       }
 
       // Long plain-text message: split across pages (height estimate per fragment)
+      const textLength = String(firstMsg.text || '').length;
+
+      // For very long messages (>5000 chars), use fast line-based splitting
+      // instead of the expensive binary search to avoid UI hanging.
+      if (textLength > 5000) {
+        const baseMsg = firstMsg;
+        const lines = String(baseMsg.text || '').split('\n');
+        const nameOnFirst = item.nameWillShow !== false;
+
+        if (currentPage.length > 0) {
+          result.push(currentPage);
+          currentPage = [];
+          usedH = 0;
+        }
+
+        let currentChunk = '';
+        let chunkLines = 0;
+        const maxLinesPerPage = Math.floor(availableHeight / (fontSize * lineHeight)) - 5;
+
+        for (let i = 0; i < lines.length; i++) {
+          if (chunkLines >= maxLinesPerPage && currentChunk.length > 0) {
+            currentPage.push({
+              ...baseMsg,
+              text: currentChunk,
+              __suppressTimeRow: true,
+              __splitFragKey: `${String(baseMsg._id)}-frag-${splitFragCounter++}`,
+            });
+            result.push(currentPage);
+            currentPage = [];
+            usedH = 0;
+            currentChunk = '';
+            chunkLines = 0;
+          }
+          currentChunk += (currentChunk ? '\n' : '') + lines[i];
+          chunkLines++;
+        }
+
+        if (currentChunk.length > 0) {
+          currentPage.push({
+            ...baseMsg,
+            text: currentChunk,
+            __suppressTimeRow: false,
+            __splitFragKey: `${String(baseMsg._id)}-frag-${splitFragCounter++}`,
+          });
+          usedH = estimateTextSliceHeightPreview(containerWidth, fontSize, lineHeight, currentChunk, nameOnFirst, messageGap);
+        }
+        continue;
+      }
+
+      // Normal splitting for messages < 5000 chars using binary search
       const baseMsg = firstMsg;
       const nameOnFirst = item.nameWillShow !== false;
       let remainder = String(baseMsg.text || '');
@@ -947,8 +1012,8 @@ export const BookPreviewPages: React.FC<BookPreviewPagesProps> = ({
     }
 
     if (currentPage.length > 0) result.push(currentPage);
-    return result.length > 0 ? result : (filteredMessages.length > 0 ? [filteredMessages] : []);
-  }, [paginationReady, msgHeights, filteredMessages, availableHeight, dateFormat, dateStyle, dateLanguage, imageLayout, containerWidth, meName, lineHeight, fontSize]);
+    return result.length > 0 ? result : (deferredMessages.length > 0 ? [deferredMessages] : []);
+  }, [paginationReady, msgHeights, deferredMessages, availableHeight, dateFormat, dateStyle, dateLanguage, imageLayout, containerWidth, meName, lineHeight, fontSize]);
   const totalPreviewPages = pages.length;
 
   // Render pages in batches of 10 to avoid crashing when pages are ready
@@ -985,7 +1050,7 @@ export const BookPreviewPages: React.FC<BookPreviewPagesProps> = ({
         onPagesCalculated(pages);
       }
     }
-  }, [pages.length, filteredMessages.length, paginationReady, availableHeight, dimensions, scale, onPagesCalculated]);
+  }, [pages.length, deferredMessages.length, paginationReady, availableHeight, dimensions, scale, onPagesCalculated]);
 
   return (
     <>
@@ -994,7 +1059,7 @@ export const BookPreviewPages: React.FC<BookPreviewPagesProps> = ({
         The pagination loop picks the correct height based on actual visibility. */}
     <View pointerEvents="none" style={{ opacity: 0, position: 'absolute', top: 0, left: 0, width: containerWidth, zIndex: -1 }}>
       {containerWidth > 0 && (() => {
-        return filteredMessages.slice(0, renderedUpTo).flatMap((msg) => {
+        return deferredMessages.slice(0, renderedUpTo).flatMap((msg) => {
           const isImage = msg.messageType === 'image';
           const isVideo = msg.messageType === 'video';
           const isAudio = msg.messageType === 'audio';
@@ -1095,6 +1160,12 @@ export const BookPreviewPages: React.FC<BookPreviewPagesProps> = ({
       })()}
     </View>
     <View style={styles.pagesContainer}>
+      {isDeferringMessages && (
+        <View style={styles.deferLoading}>
+          <ActivityIndicator size="small" color={colors.text || '#1a1a1a'} />
+          <Text style={[styles.deferLoadingText, { color: colors.text || '#1a1a1a' }]}>Loading selected book...</Text>
+        </View>
+      )}
       {(() => {
         let lastShownDate: string | null = null;
         let lastShownYear: string | null = null;
@@ -1483,8 +1554,22 @@ export const BookPreviewPages: React.FC<BookPreviewPagesProps> = ({
   );
 };
 
+export const BookPreviewPages = React.memo(BookPreviewPagesComponent);
+BookPreviewPages.displayName = 'BookPreviewPages';
+
 const styles = StyleSheet.create({
   pagesContainer: { paddingVertical: 8 },
+  deferLoading: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    marginBottom: 8,
+  },
+  deferLoadingText: {
+    fontSize: 12,
+    opacity: 0.8,
+  },
   page: {
     marginBottom: 16,
     borderRadius: 8,

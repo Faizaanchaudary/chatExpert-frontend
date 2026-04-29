@@ -1131,6 +1131,7 @@ const BookPreviewPagesComponent: React.FC<BookPreviewPagesProps> = ({
       }
 
       if (onPagesCalculated) {
+        console.log(`[BookPreviewPages] firing onPagesCalculated — pages:${pages.length} msgs:${deferredMessages.length} paginationReady:${paginationReady}`);
         onPagesCalculated(pages);
       }
     }
@@ -1200,11 +1201,17 @@ const BookPreviewPagesComponent: React.FC<BookPreviewPagesProps> = ({
 
           if (bothCached) return []; // Already in cache, no need to render
 
+          // For measurement, use the exact pixel width the bubble will render at (92% of containerWidth)
+          // so the measured height matches the actual rendered height precisely.
+          const measureBubbleWidth = isVideoOrAudio
+            ? Math.max(Math.round(containerWidth * 0.92), 260)
+            : Math.round(containerWidth * 0.92);
+
           return [
             // Variant 1: with sender name
             <View
               key={`measure-with-${msg._id}`}
-              style={{ maxWidth: '92%', minWidth: 120, alignSelf: 'flex-start', marginBottom: messageGap }}
+              style={{ width: measureBubbleWidth, alignSelf: 'flex-start', marginBottom: messageGap }}
             >
               <View
                 onLayout={(e) => {
@@ -1223,7 +1230,7 @@ const BookPreviewPagesComponent: React.FC<BookPreviewPagesProps> = ({
             // Variant 2: without sender name
             <View
               key={`measure-no-${msg._id}`}
-              style={{ maxWidth: '92%', minWidth: 120, alignSelf: 'flex-start', marginBottom: messageGap }}
+              style={{ width: measureBubbleWidth, alignSelf: 'flex-start', marginBottom: messageGap }}
             >
               <View
                 onLayout={(e) => {
@@ -1463,7 +1470,21 @@ const BookPreviewPagesComponent: React.FC<BookPreviewPagesProps> = ({
                 imageUri = `file://${rawMedia}`;
               }
             }
-            const showText = !isImage || !imageUri;
+            const isVideoOrAudio = isVideo || isAudio;
+            // For video/audio: strip the filename line (e.g. "VID-xxx.mp4 (file attached)")
+            // but keep any real caption text that follows it.
+            const displayText = isVideoOrAudio && typeof text === 'string'
+              ? text
+                  .split('\n')
+                  .filter(line => !/\.(mp4|opus|ogg|m4a|aac|wav|mov|avi|mkv|3gp)\s*\(file attached\)/i.test(line))
+                  .join('\n')
+                  .trim()
+              : text;
+            const showText = isImage
+              ? !imageUri
+              : isVideoOrAudio
+              ? displayText.length > 0
+              : true;
             const imageOnly = isImage && imageUri && !showText;
             const isMedia = msg.messageType === 'image' || msg.messageType === 'video';
             const hideSenderName = isMedia || !showSenderName; // Hide if media OR if same sender as previous
@@ -1477,6 +1498,7 @@ const BookPreviewPagesComponent: React.FC<BookPreviewPagesProps> = ({
                     alignSelf: isSender ? 'flex-end' : 'flex-start',
                     maxWidth: '92%',
                     marginHorizontal: 0,
+                    minWidth: isVideoOrAudio ? 260 : 120,
                   },
                 ]}
               >
@@ -1539,7 +1561,7 @@ const BookPreviewPagesComponent: React.FC<BookPreviewPagesProps> = ({
                         },
                       ]}
                     >
-                      {text}
+                      {isVideoOrAudio ? displayText : text}
                     </Text>
                   )}
                   {isImage && imageUri ? (

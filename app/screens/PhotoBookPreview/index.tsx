@@ -114,13 +114,16 @@ const PhotoBookPreview: React.FC<PhotoBookPreviewProps> = ({
 
   // 🔥 NEW: Callback when pages are calculated
   const handlePagesCalculated = useCallback((pages: IMessage[][]) => {
+    console.log(`[handlePagesCalculated] called — pages: ${pages.length}, booksToUpload: ${booksToUpload ? booksToUpload.length : 'null'}, needsCalculation: ${needsCalculation}, isCalculating: ${isCalculating}`);
     // Guard: Only process once during initial calculation
     if (booksToUpload) {
+      console.log('[handlePagesCalculated] SKIPPED — booksToUpload already set');
       return;
     }
     setCalculatedPages(pages);
     
     if (needsCalculation && pages.length > 0) {
+      console.log(`[handlePagesCalculated] Processing ${pages.length} pages for book splitting`);
       const {
         splitBooksWithMediaByActualPages,
         formatDateRange,
@@ -130,7 +133,7 @@ const PhotoBookPreview: React.FC<PhotoBookPreviewProps> = ({
       if (pages.length > 200) {
         // Multi-book: Split at exactly 200 pages (books use collapsed logical messages)
         const books = splitBooksWithMediaByActualPages(pages, routeMediaFiles || [], 200);
-        
+        console.log(`[handlePagesCalculated] Multi-book: ${books.length} books`);
         setBooksToUpload(books);
         
         // Show alert
@@ -146,6 +149,7 @@ const PhotoBookPreview: React.FC<PhotoBookPreviewProps> = ({
         );
       } else {
         const allMessages = collapseSplitFragmentsForBookMessages(pages);
+        console.log(`[handlePagesCalculated] Single book: ${allMessages.length} messages, ${pages.length} pages`);
         const book = {
           bookNumber: 1,
           messages: allMessages,
@@ -160,9 +164,12 @@ const PhotoBookPreview: React.FC<PhotoBookPreviewProps> = ({
         setBooksToUpload([book]);
       }
       
+      console.log('[handlePagesCalculated] Setting isCalculating = false');
       setIsCalculating(false);
+    } else {
+      console.log(`[handlePagesCalculated] NOT processing — needsCalculation: ${needsCalculation}, pages: ${pages.length}`);
     }
-  }, [needsCalculation, routeMediaFiles, booksToUpload]);
+  }, [needsCalculation, routeMediaFiles, booksToUpload, isCalculating]);
 
   // NEW: Callback when pages are recalculated from draft
   const handleDraftPagesCalculated = useCallback((pages: IMessage[][]) => {
@@ -1302,7 +1309,7 @@ const PhotoBookPreview: React.FC<PhotoBookPreviewProps> = ({
                             </View>
                           )}
                           <BookPreviewPages
-                            key={`book-preview-${deferredBookNumber}`}
+                            key={`book-preview-${chatId || photoBookId}-${deferredBookNumber}`}
                             messages={isDraftRecalculating ? messages : currentBookMessages}
                             pageCount={(() => {
                               // 🔥 NEW: Use booksToUpload actualPages if available

@@ -3,7 +3,18 @@
  * Height-based pagination to match selected page dimensions. Text preserves newlines.
  */
 import React, { useMemo, useState, useRef, useCallback, useEffect, useDeferredValue } from 'react';
-import { View, Text, StyleSheet, Image, InteractionManager, ActivityIndicator } from 'react-native';
+import {
+  View,
+  Text,
+  StyleSheet,
+  Image,
+  InteractionManager,
+  ActivityIndicator,
+  ScrollView,
+  Animated,
+  PanResponder,
+  TouchableOpacity,
+} from 'react-native';
 import { IMessage } from '../../interfaces/IMessage';
 import { ResolvedThemeConfig } from '../../themes/types';
 
@@ -510,6 +521,73 @@ const BookPreviewPagesComponent: React.FC<BookPreviewPagesProps> = ({
   const batchTimerRef = useRef<any>(null);
   const renderedUpToRef = useRef(0);
   useEffect(() => { renderedUpToRef.current = renderedUpTo; }, [renderedUpTo]);
+
+  // ── Scrollbar state ──────────────────────────────────────────────────────────
+  const pagesScrollRef = useRef<ScrollView>(null);
+  const scrollYPages = useRef(new Animated.Value(0)).current;
+  const [pagesContentHeight, setPagesContentHeight] = useState(0);
+  const [pagesViewHeight, setPagesViewHeight] = useState(0);
+  const [trackLayout, setTrackLayout] = useState({ y: 0, height: 0 });
+
+  // Minimum thumb height so it's always tappable
+  const THUMB_MIN_H = 40;
+
+  // Thumb height = proportion of visible area vs total content
+  const thumbHeight = useMemo(() => {
+    if (pagesContentHeight <= 0 || pagesViewHeight <= 0) return THUMB_MIN_H;
+    const ratio = pagesViewHeight / pagesContentHeight;
+    return Math.max(THUMB_MIN_H, Math.min(pagesViewHeight, Math.round(ratio * pagesViewHeight)));
+  }, [pagesContentHeight, pagesViewHeight]);
+
+  // Max scroll offset
+  const maxScrollOffset = Math.max(0, pagesContentHeight - pagesViewHeight);
+  // Max travel distance for the thumb inside the track
+  const thumbTravel = Math.max(0, trackLayout.height - thumbHeight);
+
+  // Animated thumb Y position
+  const thumbTranslateY = scrollYPages.interpolate({
+    inputRange: [0, Math.max(1, maxScrollOffset)],
+    outputRange: [0, thumbTravel],
+    extrapolate: 'clamp',
+  });
+
+  const dragStartScrollOffset = useRef(0);
+  const dragStartGestureY = useRef(0);
+  const thumbTravelRef = useRef(thumbTravel);
+  const maxScrollOffsetRef = useRef(maxScrollOffset);
+  const scrollYPagesValue = useRef(0);
+  useEffect(() => { thumbTravelRef.current = thumbTravel; }, [thumbTravel]);
+  useEffect(() => { maxScrollOffsetRef.current = maxScrollOffset; }, [maxScrollOffset]);
+  useEffect(() => {
+    const id = scrollYPages.addListener(({ value }) => { scrollYPagesValue.current = value; });
+    return () => scrollYPages.removeListener(id);
+  }, [scrollYPages]);
+
+  const panResponder = useRef(
+    PanResponder.create({
+      onStartShouldSetPanResponder: () => true,
+      onStartShouldSetPanResponderCapture: () => true,
+      onMoveShouldSetPanResponder: () => true,
+      onMoveShouldSetPanResponderCapture: () => true,
+      onPanResponderGrant: (e) => {
+        setSeekMode(true);
+        dragStartScrollOffset.current = scrollYPagesValue.current;
+        dragStartGestureY.current = e.nativeEvent.pageY;
+      },
+      onPanResponderMove: (e) => {
+        const travel = thumbTravelRef.current;
+        const maxOff = maxScrollOffsetRef.current;
+        if (travel <= 0 || maxOff <= 0) return;
+        const dy = e.nativeEvent.pageY - dragStartGestureY.current;
+        const scrollDelta = (dy / travel) * maxOff;
+        const newOffset = Math.max(0, Math.min(maxOff, dragStartScrollOffset.current + scrollDelta));
+        pagesScrollRef.current?.scrollTo({ y: newOffset, animated: false });
+      },
+      onPanResponderTerminationRequest: () => false,
+      onPanResponderRelease: () => {},
+    })
+  ).current;
+  // ─────────────────────────────────────────────────────────────────────────────
 
   useEffect(() => {
     if (containerWidth <= 0) return;
@@ -1019,20 +1097,26 @@ const BookPreviewPagesComponent: React.FC<BookPreviewPagesProps> = ({
   // Render pages in batches of 10 to avoid crashing when pages are ready
   const PAGE_RENDER_BATCH = 10;
   const [renderedPageCount, setRenderedPageCount] = useState(PAGE_RENDER_BATCH);
+  const [seekMode, setSeekMode] = useState(false);
   const pageRenderTimerRef = useRef<any>(null);
 
   useEffect(() => {
     if (!paginationReady || pages.length === 0) return;
+    setSeekMode(false);
     setRenderedPageCount(PAGE_RENDER_BATCH);
   }, [paginationReady, pages.length]);
 
   useEffect(() => {
+    if (seekMode && paginationReady && renderedPageCount < pages.length) {
+      setRenderedPageCount(pages.length);
+      return;
+    }
     if (!paginationReady || renderedPageCount >= pages.length) return;
     pageRenderTimerRef.current = setTimeout(() => {
       setRenderedPageCount(prev => Math.min(prev + PAGE_RENDER_BATCH, pages.length));
     }, 100);
     return () => { if (pageRenderTimerRef.current) clearTimeout(pageRenderTimerRef.current); };
-  }, [renderedPageCount, paginationReady, pages.length]);
+  }, [renderedPageCount, paginationReady, pages.length, seekMode]);
 
   // Console log for page calculation comparison
   React.useEffect(() => {
@@ -1159,20 +1243,42 @@ const BookPreviewPagesComponent: React.FC<BookPreviewPagesProps> = ({
         });
       })()}
     </View>
-    <View style={styles.pagesContainer}>
-      {isDeferringMessages && (
-        <View style={styles.deferLoading}>
-          <ActivityIndicator size="small" color={colors.text || '#1a1a1a'} />
-          <Text style={[styles.deferLoadingText, { color: colors.text || '#1a1a1a' }]}>Loading selected book...</Text>
+    {/* ── Scrollable pages area with custom scrollbar ─────────────────────── */}
+    <View style={{ position: 'relative' }}>
+      {/* Small warning banner above the pages — only while pagination is still running */}
+      {!paginationReady && (
+        <View style={styles.scrollWaitBanner}>
+          <Text style={styles.scrollWaitText}>⏳ Calculating pages, scroll available soon…</Text>
         </View>
       )}
-      {(() => {
-        let lastShownDate: string | null = null;
-        let lastShownYear: string | null = null;
-        let lastShownMonth: string | null = null;
-        let globalMessageIndex = 0;
-        let lastSenderName: string | null = null; // Track sender across pages
-        let lastSenderSide: boolean | null = null; // Track sender side (true/false)
+      <ScrollView
+        ref={pagesScrollRef}
+        showsVerticalScrollIndicator={false}
+        scrollEventThrottle={16}
+        scrollEnabled={paginationReady}
+        onScroll={Animated.event(
+          [{ nativeEvent: { contentOffset: { y: scrollYPages } } }],
+          { useNativeDriver: false }
+        )}
+        onContentSizeChange={(_, h) => setPagesContentHeight(h)}
+        onLayout={(e) => setPagesViewHeight(e.nativeEvent.layout.height)}
+        style={{ height: paginationReady ? pageHeight + 32 : 0 }}
+        nestedScrollEnabled
+      >
+        <View style={styles.pagesContainer}>
+          {isDeferringMessages && (
+            <View style={styles.deferLoading}>
+              <ActivityIndicator size="small" color={colors.text || '#1a1a1a'} />
+              <Text style={[styles.deferLoadingText, { color: colors.text || '#1a1a1a' }]}>Loading selected book...</Text>
+            </View>
+          )}
+          {(() => {
+            let lastShownDate: string | null = null;
+            let lastShownYear: string | null = null;
+            let lastShownMonth: string | null = null;
+            let globalMessageIndex = 0;
+            let lastSenderName: string | null = null; // Track sender across pages
+            let lastSenderSide: boolean | null = null; // Track sender side (true/false)
 
         return pages.slice(0, renderedPageCount).map((pageMessages, pageIndex) => {
           const pageElements: JSX.Element[] = [];
@@ -1549,6 +1655,39 @@ const BookPreviewPagesComponent: React.FC<BookPreviewPagesProps> = ({
           );
         });
       })()}
+        </View>
+      </ScrollView>
+
+      {/* Custom scrollbar — only visible when content overflows and pages are ready */}
+      {paginationReady && pagesContentHeight > pagesViewHeight && (
+        <TouchableOpacity
+          activeOpacity={1}
+          onLayout={(e) => {
+            const { y, height } = e.nativeEvent.layout;
+            setTrackLayout({ y, height });
+          }}
+          onPress={(e) => {
+            if (trackLayout.height <= 0 || thumbTravel <= 0) return;
+            setSeekMode(true);
+            const tapY = Math.max(0, Math.min(e.nativeEvent.locationY, trackLayout.height));
+            const ratio = tapY / trackLayout.height;
+            const newOffset = ratio * maxScrollOffset;
+            pagesScrollRef.current?.scrollTo({ y: newOffset, animated: true });
+          }}
+          style={styles.scrollbarTrack}
+        >
+          <Animated.View
+            style={[
+              styles.scrollbarThumb,
+              {
+                height: thumbHeight,
+                transform: [{ translateY: thumbTranslateY }],
+              },
+            ]}
+            {...panResponder.panHandlers}
+          />
+        </TouchableOpacity>
+      )}
     </View>
     </>
   );
@@ -1558,7 +1697,7 @@ export const BookPreviewPages = React.memo(BookPreviewPagesComponent);
 BookPreviewPages.displayName = 'BookPreviewPages';
 
 const styles = StyleSheet.create({
-  pagesContainer: { paddingVertical: 8 },
+  pagesContainer: { paddingVertical: 8, paddingRight: 16 }, // right padding so pages don't overlap scrollbar
   deferLoading: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -1754,5 +1893,34 @@ const styles = StyleSheet.create({
   gridTime: {
     opacity: 0.7,
     marginTop: 2,
+  },
+  scrollbarTrack: {
+    position: 'absolute',
+    right: 2,
+    top: 0,
+    bottom: 0,
+    width: 10,
+    backgroundColor: 'rgba(0,0,0,0.08)',
+    borderRadius: 5,
+  },
+  scrollbarThumb: {
+    width: 10,
+    backgroundColor: 'rgba(100,100,100,0.55)',
+    borderRadius: 5,
+  },
+  scrollWaitBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 5,
+    paddingHorizontal: 10,
+    backgroundColor: 'rgba(0,0,0,0.05)',
+    borderRadius: 6,
+    marginBottom: 6,
+  },
+  scrollWaitText: {
+    fontSize: 11,
+    color: '#888',
+    textAlign: 'center',
   },
 });

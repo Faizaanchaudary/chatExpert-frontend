@@ -75,6 +75,7 @@ const PhotoBookPreview: React.FC<PhotoBookPreviewProps> = ({
   const [saveError, setSaveError] = useState<string | null>(null);
   const [previewAreaWidth, setPreviewAreaWidth] = useState<number>(0);
   const [titleEditorVisible, setTitleEditorVisible] = useState(false);
+  const [themeUpdateRequested, setThemeUpdateRequested] = useState(false);
   
   // NEW: Multi-book support
   const [currentBookNumber, setCurrentBookNumber] = useState(1);
@@ -434,7 +435,13 @@ const PhotoBookPreview: React.FC<PhotoBookPreviewProps> = ({
     [resolvedConfig, overrides.fontSize, classicDefaults.fontSize, classicDefaults.lineHeight],
   );
   const deferredPreviewConfig = React.useDeferredValue(normalizedPreviewConfig);
-  const isThemeOptionsPending = deferredPreviewConfig !== normalizedPreviewConfig;
+  const isThemeOptionsPending =
+    themeUpdateRequested && deferredPreviewConfig !== normalizedPreviewConfig;
+  useEffect(() => {
+    if (themeUpdateRequested && deferredPreviewConfig === normalizedPreviewConfig) {
+      setThemeUpdateRequested(false);
+    }
+  }, [themeUpdateRequested, deferredPreviewConfig, normalizedPreviewConfig]);
 
   // NEW: Load books metadata from photoBook OR booksToUpload
   useEffect(() => {
@@ -735,10 +742,12 @@ const PhotoBookPreview: React.FC<PhotoBookPreviewProps> = ({
   }, [photoBook, messages, needsCalculation, isDraftRecalculating, draftBooks]);
 
   const handleSelectTheme = (id: string) => {
+    setThemeUpdateRequested(true);
     dispatch(setThemeConfigForProject({ photoBookId: themeProjectKey, themeId: id, overrides }));
   };
 
   const handleDateFormat = (v: 'full' | 'timeOnly' | 'hidden') => {
+    setThemeUpdateRequested(true);
     dispatch(
       setThemeConfigForProject({
         photoBookId: themeProjectKey,
@@ -748,6 +757,7 @@ const PhotoBookPreview: React.FC<PhotoBookPreviewProps> = ({
     );
   };
   const handleShowPageNumbers = (v: boolean) => {
+    setThemeUpdateRequested(true);
     dispatch(
       setThemeConfigForProject({
         photoBookId: themeProjectKey,
@@ -757,6 +767,7 @@ const PhotoBookPreview: React.FC<PhotoBookPreviewProps> = ({
     );
   };
   const handleSenderLabelStyle = (v: 'name' | 'initial' | 'hidden') => {
+    setThemeUpdateRequested(true);
     dispatch(
       setThemeConfigForProject({
         photoBookId: themeProjectKey,
@@ -766,6 +777,7 @@ const PhotoBookPreview: React.FC<PhotoBookPreviewProps> = ({
     );
   };
   const handleFontFamily = (v: string) => {
+    setThemeUpdateRequested(true);
     dispatch(
       setThemeConfigForProject({
         photoBookId: themeProjectKey,
@@ -775,6 +787,7 @@ const PhotoBookPreview: React.FC<PhotoBookPreviewProps> = ({
     );
   };
   const handleFontSize = (v: number) => {
+    setThemeUpdateRequested(true);
     dispatch(
       setThemeConfigForProject({
         photoBookId: themeProjectKey,
@@ -784,6 +797,7 @@ const PhotoBookPreview: React.FC<PhotoBookPreviewProps> = ({
     );
   };
   const handleMessageBold = (v: boolean) => {
+    setThemeUpdateRequested(true);
     dispatch(
       setThemeConfigForProject({
         photoBookId: themeProjectKey,
@@ -793,6 +807,7 @@ const PhotoBookPreview: React.FC<PhotoBookPreviewProps> = ({
     );
   };
   const handleMessageItalic = (v: boolean) => {
+    setThemeUpdateRequested(true);
     dispatch(
       setThemeConfigForProject({
         photoBookId: themeProjectKey,
@@ -802,6 +817,7 @@ const PhotoBookPreview: React.FC<PhotoBookPreviewProps> = ({
     );
   };
   const handleImageLayout = (v: 'fullPage' | 'grid' | 'maxGrid') => {
+    setThemeUpdateRequested(true);
     dispatch(
       setThemeConfigForProject({
         photoBookId: themeProjectKey,
@@ -811,6 +827,7 @@ const PhotoBookPreview: React.FC<PhotoBookPreviewProps> = ({
     );
   };
   const handleDateStyle = (v: 'short' | 'long' | 'dayName') => {
+    setThemeUpdateRequested(true);
     dispatch(
       setThemeConfigForProject({
         photoBookId: themeProjectKey,
@@ -820,6 +837,7 @@ const PhotoBookPreview: React.FC<PhotoBookPreviewProps> = ({
     );
   };
   const handleDateLanguage = (v: 'en' | 'fr' | 'es') => {
+    setThemeUpdateRequested(true);
     dispatch(
       setThemeConfigForProject({
         photoBookId: themeProjectKey,
@@ -876,6 +894,7 @@ const PhotoBookPreview: React.FC<PhotoBookPreviewProps> = ({
   };
 
   const handleSaveTitles = (customTitles: any) => {
+    setThemeUpdateRequested(true);
     dispatch(
       setThemeConfigForProject({
         photoBookId: themeProjectKey,

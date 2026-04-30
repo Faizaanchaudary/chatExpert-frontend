@@ -17,6 +17,7 @@ import {
 } from 'react-native';
 import { IMessage } from '../../interfaces/IMessage';
 import { ResolvedThemeConfig } from '../../themes/types';
+import { appendPreviewDebugLog, previewDebugLogPath } from '../../utils/previewDebugLogger';
 
 // Global height cache — persists across book switches, keyed by "msgId_containerWidth_[withName|noName]"
 const globalHeightCache: Record<string, number> = {};
@@ -37,6 +38,22 @@ const PAGE_DIMENSIONS = {
 // The buffer covers: last message marginBottom (3), page number area at bottom:8,
 // and a small cushion so the last bubble never visually touches the bottom edge.
 const PAGE_OVERHEAD = 48;
+const DEBUG_PREVIEW_LAYOUT = __DEV__;
+// Header estimates for pagination (tuned to match rendered blocks with current styles).
+// Previous values under-counted by ~7px per header in debug runs, causing occasional clipping.
+const YEAR_HEADER_ESTIMATE = 67;
+const MONTH_HEADER_ESTIMATE = 46;
+const DATE_HEADER_ESTIMATE = 40;
+// Extra guard for split fragments: measured text slices can still render taller by ~30-50px.
+const SPLIT_FRAGMENT_SAFETY = 56;
+const PAGE_NUMBER_RESERVE = 12;
+const ATOMIC_BOTTOM_SAFETY = 8;
+const LONG_TEXT_ATOMIC_SAFETY = 18;
+const VERY_LONG_TEXT_ATOMIC_SAFETY = 12;
+const LONG_DATE_FIRST_FRAG_SAFETY = 42;
+const LONG_SPLIT_FRAGMENT_FUDGE = 44;
+const LONG_SPLIT_LAST_FRAGMENT_FUDGE = 28;
+const MEDIA_ATOMIC_SAFETY = 18;
 
 /** System message filter - same as backend PDF generation */
 const SYSTEM_SENDER_NAMES = ['system', 'whatsapp', 'notification'];
@@ -94,7 +111,9 @@ function estimateTextSliceHeightPreview(
   showName: boolean,
   messageGap: number
 ): number {
-  const bubbleWidth = containerWidth * 0.92 - 20;
+  // Match visible page content width: page has paddingHorizontal: 12 on both sides.
+  const contentWidth = Math.max(1, containerWidth - 24);
+  const bubbleWidth = contentWidth * 0.92 - 20;
   const textWidth = Math.max(40, bubbleWidth - 60);
   const charsPerLine = Math.max(1, Math.floor(textWidth / (fontSize * 0.55)));
   const str = String(text || '');
@@ -174,6 +193,20 @@ function getMostFrequentSenderName(msgs: IMessage[]): string | null {
 function isMessageFromMe(senderName: string, meName: string | null): boolean {
   if (!meName) return false;
   return (senderName || '').trim() === meName;
+}
+
+function stripMediaTitleLine(text: string, isVideoOrAudio: boolean): string {
+  if (!isVideoOrAudio || !text) return text || '';
+  const lines = String(text).split('\n');
+  if (lines.length === 0) return '';
+  const firstLine = lines[0].trim();
+  // Remove media filename title line like:
+  // "VID-20200404-WA0001.mp4 (file attached)" or "(fichier joint)"
+  const mediaTitlePattern = /^[^\n]+\.(mp4|opus|ogg|m4a|aac|wav|mov|avi|mkv|3gp)(\s*\([^)]*\))?\s*$/i;
+  if (mediaTitlePattern.test(firstLine)) {
+    return lines.slice(1).join('\n').trim();
+  }
+  return String(text).trim();
 }
 
 function mapCssFontFamilyToReactNative(fontFamily?: string): string | undefined {
@@ -515,6 +548,8 @@ const BookPreviewPagesComponent: React.FC<BookPreviewPagesProps> = ({
   const lastContainerWidthRef = useRef<number>(0);
   const measurementInProgressRef = useRef<boolean>(false);
   const lastMeasuredMessagesRef = useRef<IMessage[] | null>(null);
+  const measurementStartMsRef = useRef<number>(0);
+  const lastProgressLogMeasuredCountRef = useRef<number>(0);
 
   const BATCH_SIZE = 150;
   const [renderedUpTo, setRenderedUpTo] = useState(0);
@@ -528,6 +563,33 @@ const BookPreviewPagesComponent: React.FC<BookPreviewPagesProps> = ({
   const [pagesContentHeight, setPagesContentHeight] = useState(0);
   const [pagesViewHeight, setPagesViewHeight] = useState(0);
   const [trackLayout, setTrackLayout] = useState({ y: 0, height: 0 });
+  const debugLoggedBubbleKeysRef = useRef<Set<string>>(new Set());
+  const debugPageMetricsRef = useRef<Record<number, { contentHeight?: number; estimatedHeight?: number }>>({});
+  const debugHeaderKeysRef = useRef<Set<string>>(new Set());
+  const debugSplitKeysRef = useRef<Set<string>>(new Set());
+  const debugHeaderLayoutKeysRef = useRef<Set<string>>(new Set());
+  const debugMediaLayoutKeysRef = useRef<Set<string>>(new Set());
+  const pageHorizontalPadding = 12;
+  const pageContentWidth = Math.max(1, containerWidth - pageHorizontalPadding * 2);
+
+  const debugLog = useCallback((scope: string, data: Record<string, unknown>) => {
+    if (!DEBUG_PREVIEW_LAYOUT) return;
+    console.log(`[PreviewDebug:${scope}]`, data);
+    appendPreviewDebugLog(scope, data);
+  }, []);
+
+  useEffect(() => {
+    if (!DEBUG_PREVIEW_LAYOUT) return;
+    debugLog('log-file-path', { path: previewDebugLogPath });
+  }, [debugLog]);
+
+  const debugLogOnce = useCallback((scope: string, key: string, data: Record<string, unknown>) => {
+    if (!DEBUG_PREVIEW_LAYOUT) return;
+    const compositeKey = `${scope}:${key}`;
+    if (debugHeaderKeysRef.current.has(compositeKey)) return;
+    debugHeaderKeysRef.current.add(compositeKey);
+    debugLog(scope, data);
+  }, [debugLog]);
 
   // Minimum thumb height so it's always tappable
   const THUMB_MIN_H = 40;
@@ -609,6 +671,8 @@ const BookPreviewPagesComponent: React.FC<BookPreviewPagesProps> = ({
     lastContainerWidthRef.current = containerWidth;
     lastMeasuredMessagesRef.current = deferredMessages;
     measurementInProgressRef.current = true;
+    measurementStartMsRef.current = Date.now();
+    lastProgressLogMeasuredCountRef.current = 0;
 
     // Check global cache — already measured messages don't need re-rendering
     const cacheWidth = Math.round(containerWidth);
@@ -627,6 +691,26 @@ const BookPreviewPagesComponent: React.FC<BookPreviewPagesProps> = ({
       }
     }
 
+    debugLog('measurement-cache-scan', {
+      deferredMessages: deferredMessages.length,
+      cachedMessages: Object.keys(preloaded).length,
+      uncachedMessages: uncached.length,
+      containerWidth,
+      cacheWidth,
+      fontSize,
+      lineHeight,
+      imageLayout,
+      dateFormat,
+    });
+    debugLog('measurement-start', {
+      deferredMessages: deferredMessages.length,
+      uncachedMessages: uncached.length,
+      containerWidth,
+      cacheWidth,
+      batchSize: BATCH_SIZE,
+      isDeferringMessages,
+    });
+
     if (uncached.length === 0) {
       measuredRef.current = preloaded;
       pendingRef.current = 0;
@@ -634,6 +718,11 @@ const BookPreviewPagesComponent: React.FC<BookPreviewPagesProps> = ({
       setPaginationReady(true);
       setRenderedUpTo(0);
       measurementInProgressRef.current = false;
+      debugLog('measurement-complete-cache-hit', {
+        deferredMessages: deferredMessages.length,
+        measuredMessages: Object.keys(preloaded).length,
+        elapsedMs: Date.now() - measurementStartMsRef.current,
+      });
       return;
     }
 
@@ -645,10 +734,32 @@ const BookPreviewPagesComponent: React.FC<BookPreviewPagesProps> = ({
     if (batchTimerRef.current) clearTimeout(batchTimerRef.current);
     setRenderedUpTo(0);
     InteractionManager.runAfterInteractions(() => {
-      setRenderedUpTo(Math.min(BATCH_SIZE, deferredMessages.length));
+      const firstBatchEnd = Math.min(BATCH_SIZE, deferredMessages.length);
+      debugLog('measurement-batch-scheduled', {
+        reason: 'initial',
+        firstBatchEnd,
+        deferredMessages: deferredMessages.length,
+      });
+      setRenderedUpTo(firstBatchEnd);
     });
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [deferredMessages, containerWidth]);
+
+  useEffect(() => {
+    if (!DEBUG_PREVIEW_LAYOUT) return;
+    if (!measurementInProgressRef.current || paginationReady) return;
+    const timer = setInterval(() => {
+      const measuredCount = Object.keys(measuredRef.current).length;
+      debugLog('measurement-heartbeat', {
+        deferredMessages: deferredMessages.length,
+        measuredCount,
+        pendingCount: pendingRef.current,
+        renderedUpTo: renderedUpToRef.current,
+        elapsedMs: Date.now() - measurementStartMsRef.current,
+      });
+    }, 2000);
+    return () => clearInterval(timer);
+  }, [debugLog, deferredMessages.length, paginationReady]);
 
   const onMsgLayout = useCallback((id: string, hWith: number, hNo: number) => {
     if (id in measuredRef.current) return;
@@ -660,10 +771,28 @@ const BookPreviewPagesComponent: React.FC<BookPreviewPagesProps> = ({
     globalHeightCache[`${id}_${cacheWidth}_withName`] = hWith;
     globalHeightCache[`${id}_${cacheWidth}_noName`]   = hNo;
 
+    const measuredCount = Object.keys(measuredRef.current).length;
+    if (
+      measuredCount - lastProgressLogMeasuredCountRef.current >= 40 ||
+      pendingRef.current <= 5
+    ) {
+      lastProgressLogMeasuredCountRef.current = measuredCount;
+      debugLog('measurement-progress', {
+        measuredCount,
+        pendingCount: pendingRef.current,
+        renderedUpTo: renderedUpToRef.current,
+        elapsedMs: Date.now() - measurementStartMsRef.current,
+      });
+    }
+
     if (pendingRef.current === 0) {
       setMsgHeights({ ...measuredRef.current });
       setPaginationReady(true);
       measurementInProgressRef.current = false;
+      debugLog('measurement-complete', {
+        measuredCount,
+        elapsedMs: Date.now() - measurementStartMsRef.current,
+      });
     } else {
       const currentBatchEnd = renderedUpToRef.current;
       const currentBatchMeasured = Object.keys(measuredRef.current).length;
@@ -672,6 +801,13 @@ const BookPreviewPagesComponent: React.FC<BookPreviewPagesProps> = ({
         if (batchTimerRef.current) clearTimeout(batchTimerRef.current);
         batchTimerRef.current = setTimeout(() => {
           InteractionManager.runAfterInteractions(() => {
+            debugLog('measurement-batch-scheduled', {
+              reason: 'advance',
+              currentBatchEnd,
+              nextEnd,
+              currentBatchMeasured,
+              deferredMessages: deferredMessages.length,
+            });
             setRenderedUpTo(nextEnd);
           });
         }, 50);
@@ -749,8 +885,10 @@ const BookPreviewPagesComponent: React.FC<BookPreviewPagesProps> = ({
     });
   };
   
-  // Height-based pages — fit messages into each page based on available height
-  const availableHeight = pageHeight - PAGE_OVERHEAD;
+  // Height-based pages — fit messages into each page based on available height.
+  // Reserve extra space for page number row when enabled (prevents end-of-page clipping).
+  const pageNumberReserve = showPageNumbers ? PAGE_NUMBER_RESERVE : 0;
+  const availableHeight = pageHeight - PAGE_OVERHEAD - pageNumberReserve;
   const pages: IMessage[][] = useMemo(() => {
     if (!paginationReady) return [];
 
@@ -847,6 +985,17 @@ const BookPreviewPagesComponent: React.FC<BookPreviewPagesProps> = ({
 
       if (!singleSplittable) {
         let rawMsgH = item.height;
+        const atomicTextLen = String(firstMsg.text || '').length;
+        const isAtomicMedia = firstMsg.messageType === 'video' || firstMsg.messageType === 'audio';
+        if (isSplittableTextMessage(firstMsg) && atomicTextLen > 180) {
+          rawMsgH += LONG_TEXT_ATOMIC_SAFETY;
+          if (atomicTextLen > 350) {
+            rawMsgH += VERY_LONG_TEXT_ATOMIC_SAFETY;
+          }
+        }
+        if (isAtomicMedia) {
+          rawMsgH += MEDIA_ATOMIC_SAFETY;
+        }
         let headerH = 0;
 
         if (dateFormat === 'full') {
@@ -854,19 +1003,41 @@ const BookPreviewPagesComponent: React.FC<BookPreviewPagesProps> = ({
           const ym = getYearMonth(msgDateStr);
           const formattedDate = formatDate(msgDateStr, dateStyle, dateLanguage);
           if (ym && ym.year !== lastYear) {
-            headerH += 68;
+            headerH += YEAR_HEADER_ESTIMATE;
             paginationLastSenderName = null;
             paginationLastSenderSide = null;
           }
           if (ym && ym.month !== lastMonth) {
-            headerH += 48;
+            headerH += MONTH_HEADER_ESTIMATE;
             paginationLastSenderName = null;
             paginationLastSenderSide = null;
           }
           if (formattedDate && formattedDate !== lastDate) {
-            headerH += 44;
+            headerH += DATE_HEADER_ESTIMATE;
             paginationLastSenderName = null;
             paginationLastSenderSide = null;
+          }
+          if (headerH > 0) {
+            const msgId = String(firstMsg._id ?? 'unknown');
+            const remainingBefore = availableHeight - (usedH + (item.height + headerH));
+            debugLogOnce('header-atomic-budget', `${msgId}:${ym?.year ?? 'na'}:${ym?.month ?? 'na'}:${formattedDate ?? 'na'}:${headerH}`, {
+              messageId: msgId,
+              sender: firstMsg.senderName || 'unknown',
+              messageType: firstMsg.messageType || 'text',
+              textLength: String(firstMsg.text || '').length,
+              headerH,
+              messageH: item.height,
+              rawMsgH,
+              mediaAtomicSafety: isAtomicMedia ? MEDIA_ATOMIC_SAFETY : 0,
+              usedHBefore: Number(usedH.toFixed(2)),
+              availableHeight: Number(availableHeight.toFixed(2)),
+              remainingAfterPlacement: Number(remainingBefore.toFixed(2)),
+              yearChanged: !!(ym && ym.year !== lastYear),
+              monthChanged: !!(ym && ym.month !== lastMonth),
+              dateChanged: !!(formattedDate && formattedDate !== lastDate),
+              msgDateStr,
+              formattedDate: formattedDate || null,
+            });
           }
         }
 
@@ -877,6 +1048,14 @@ const BookPreviewPagesComponent: React.FC<BookPreviewPagesProps> = ({
 
         const totalH = rawMsgH + headerH;
 
+        // If current page can't fit this item, flush page first then evaluate on a fresh page.
+        if (usedH + totalH > availableHeight - ATOMIC_BOTTOM_SAFETY && currentPage.length > 0) {
+          result.push(currentPage);
+          currentPage = [];
+          usedH = 0;
+        }
+
+        // When headers make first placement overflow, emit a header-only page then place message.
         if (currentPage.length === 0 && headerH > 0 && totalH > availableHeight) {
           result.push([]);
           if (dateFormat === 'full') {
@@ -891,10 +1070,10 @@ const BookPreviewPagesComponent: React.FC<BookPreviewPagesProps> = ({
           continue;
         }
 
-        if (usedH + totalH > availableHeight && currentPage.length > 0) {
-          result.push(currentPage);
-          currentPage = [...item.messages];
-          usedH = totalH;
+        // Defensive: if an atomic message still exceeds page height, clamp accounting to avoid over-pack.
+        if (currentPage.length === 0 && totalH > availableHeight) {
+          currentPage.push(...item.messages);
+          usedH = Math.min(rawMsgH, availableHeight);
         } else {
           currentPage.push(...item.messages);
           usedH += totalH;
@@ -969,6 +1148,34 @@ const BookPreviewPagesComponent: React.FC<BookPreviewPagesProps> = ({
       let splitGuard = 0;
       const splitVerticalBuffer = Math.max(100, Math.ceil(fontSize * lineHeight) + 18);
 
+      // Deterministic guard: start long split messages on a fresh page.
+      // This avoids edge clipping when previous items/date blocks consume height.
+      if (remainder.length > 220) {
+        debugLog('long-split-preflush-check', {
+          messageId: String(baseMsg._id ?? 'unknown'),
+          sender: baseMsg.senderName || 'unknown',
+          totalTextLength: remainder.length,
+          currentPageLength: currentPage.length,
+          usedHBefore: Number(usedH.toFixed(2)),
+          availableHeight: Number(availableHeight.toFixed(2)),
+          splitVerticalBuffer,
+          splitFragmentSafety: SPLIT_FRAGMENT_SAFETY,
+          longDateFirstFragSafety: LONG_DATE_FIRST_FRAG_SAFETY,
+        });
+      }
+      if (currentPage.length > 0 && remainder.length > 220) {
+        debugLog('long-split-preflush-triggered', {
+          messageId: String(baseMsg._id ?? 'unknown'),
+          sender: baseMsg.senderName || 'unknown',
+          totalTextLength: remainder.length,
+          flushedPageLength: currentPage.length,
+          usedHBeforeFlush: Number(usedH.toFixed(2)),
+        });
+        result.push(currentPage);
+        currentPage = [];
+        usedH = 0;
+      }
+
       const itemSenderName = baseMsg.senderName || null;
       const itemSenderSide = isMessageFromMe(baseMsg.senderName || '', meName);
       paginationLastSenderName = itemSenderName;
@@ -981,19 +1188,59 @@ const BookPreviewPagesComponent: React.FC<BookPreviewPagesProps> = ({
           const ym = getYearMonth(msgDateStr);
           const formattedDate = formatDate(msgDateStr, dateStyle, dateLanguage);
           if (ym && ym.year !== lastYear) {
-            headerH += 68;
+            headerH += YEAR_HEADER_ESTIMATE;
             paginationLastSenderName = null;
             paginationLastSenderSide = null;
           }
           if (ym && ym.month !== lastMonth) {
-            headerH += 48;
+            headerH += MONTH_HEADER_ESTIMATE;
             paginationLastSenderName = null;
             paginationLastSenderSide = null;
           }
           if (formattedDate && formattedDate !== lastDate) {
-            headerH += 44;
+            headerH += DATE_HEADER_ESTIMATE;
             paginationLastSenderName = null;
             paginationLastSenderSide = null;
+          }
+          if (headerH > 0) {
+            const msgId = String(baseMsg._id ?? 'unknown');
+            debugLogOnce('header-split-first-frag', `${msgId}:${ym?.year ?? 'na'}:${ym?.month ?? 'na'}:${formattedDate ?? 'na'}:${headerH}`, {
+              messageId: msgId,
+              sender: baseMsg.senderName || 'unknown',
+              textLength: String(baseMsg.text || '').length,
+              firstFragOfMsg,
+              headerH,
+              usedHBefore: Number(usedH.toFixed(2)),
+              availableHeight: Number(availableHeight.toFixed(2)),
+              splitVerticalBuffer,
+              yearChanged: !!(ym && ym.year !== lastYear),
+              monthChanged: !!(ym && ym.month !== lastMonth),
+              dateChanged: !!(formattedDate && formattedDate !== lastDate),
+              msgDateStr,
+              formattedDate: formattedDate || null,
+            });
+          }
+
+          // Focused forensic log: long text + date transition at split start.
+          if (String(baseMsg.text || '').length > 220) {
+            const msgId = String(baseMsg._id ?? 'unknown');
+            debugLog('long-date-split-context', {
+              messageId: msgId,
+              sender: baseMsg.senderName || 'unknown',
+              totalTextLength: String(baseMsg.text || '').length,
+              firstFragOfMsg,
+              msgDateStr,
+              formattedDate: formattedDate || null,
+              ymYear: ym?.year || null,
+              ymMonth: ym?.month || null,
+              lastYearBefore: lastYear,
+              lastMonthBefore: lastMonth,
+              lastDateBefore: lastDate,
+              headerH,
+              usedHBefore: Number(usedH.toFixed(2)),
+              availableHeight: Number(availableHeight.toFixed(2)),
+              splitVerticalBuffer,
+            });
           }
         }
 
@@ -1032,7 +1279,14 @@ const BookPreviewPagesComponent: React.FC<BookPreviewPagesProps> = ({
         }
 
         const withNameNow = firstFragOfMsg && nameOnFirst;
-        const splitHeightBudget = Math.max(1, space - splitVerticalBuffer);
+        const longDateFirstFragSafety =
+          firstFragOfMsg && String(baseMsg.text || '').length > 220
+            ? LONG_DATE_FIRST_FRAG_SAFETY
+            : 0;
+        const splitHeightBudget = Math.max(
+          1,
+          space - splitVerticalBuffer - SPLIT_FRAGMENT_SAFETY - longDateFirstFragSafety
+        );
         const prefixLen = longestFittingPrefixPreview(
           containerWidth,
           fontSize,
@@ -1059,9 +1313,68 @@ const BookPreviewPagesComponent: React.FC<BookPreviewPagesProps> = ({
           withNameNow,
           messageGap
         );
+        const longSplitFragFudge =
+          String(baseMsg.text || '').length > 220
+            ? (isLastPart ? LONG_SPLIT_LAST_FRAGMENT_FUDGE : LONG_SPLIT_FRAGMENT_FUDGE)
+            : 0;
+        const effectiveFragH = fragH + longSplitFragFudge;
 
-        const pageBottomBudget = availableHeight - splitVerticalBuffer;
-        if (currentPage.length > 0 && usedH + headerH + fragH > pageBottomBudget) {
+        if (String(baseMsg.text || '').length > 220) {
+          const splitKey = `${String(baseMsg._id)}:${splitGuard}:${firstFragOfMsg ? 'first' : 'next'}`;
+          if (!debugSplitKeysRef.current.has(splitKey)) {
+            debugSplitKeysRef.current.add(splitKey);
+            debugLog('split-fragment-budget', {
+              messageId: String(baseMsg._id),
+              sender: baseMsg.senderName || 'unknown',
+              totalTextLength: String(baseMsg.text || '').length,
+              remainderLength: remainder.length,
+              prefixLength: prefix.length,
+              splitGuard,
+              firstFragOfMsg,
+              withNameNow,
+              headerH,
+              usedHBefore: Number(usedH.toFixed(2)),
+              availableHeight: Number(availableHeight.toFixed(2)),
+              splitVerticalBuffer,
+              longDateFirstFragSafety,
+              splitHeightBudget: Number(splitHeightBudget.toFixed(2)),
+              fragH: Number(fragH.toFixed(2)),
+              longSplitFragFudge,
+              effectiveFragH: Number(effectiveFragH.toFixed(2)),
+              pageBottomBudget: Number((availableHeight - splitVerticalBuffer - SPLIT_FRAGMENT_SAFETY - longDateFirstFragSafety).toFixed(2)),
+              wouldOverflowPageBottom:
+                usedH + headerH + effectiveFragH >
+                availableHeight - splitVerticalBuffer - SPLIT_FRAGMENT_SAFETY - longDateFirstFragSafety,
+              suppressTimeOnFrag: !isLastPart,
+            });
+          }
+
+          // Extra long-message signal to inspect page-1 cut cases.
+          debugLog('long-date-frag-decision', {
+            messageId: String(baseMsg._id),
+            sender: baseMsg.senderName || 'unknown',
+            totalTextLength: String(baseMsg.text || '').length,
+            splitGuard,
+            firstFragOfMsg,
+            prefixLength: prefix.length,
+            remainderLengthBeforeCut: remainder.length,
+            fragH: Number(fragH.toFixed(2)),
+            longSplitFragFudge,
+            effectiveFragH: Number(effectiveFragH.toFixed(2)),
+            headerH,
+            usedHBefore: Number(usedH.toFixed(2)),
+            longDateFirstFragSafety,
+            wouldOverflowPageBottom:
+              usedH + headerH + effectiveFragH >
+              availableHeight - splitVerticalBuffer - SPLIT_FRAGMENT_SAFETY - longDateFirstFragSafety,
+            isLastPart,
+            suppressTimeOnFrag: !isLastPart,
+          });
+        }
+
+        const pageBottomBudget =
+          availableHeight - splitVerticalBuffer - SPLIT_FRAGMENT_SAFETY - longDateFirstFragSafety;
+        if (currentPage.length > 0 && usedH + headerH + effectiveFragH > pageBottomBudget) {
           result.push(currentPage);
           currentPage = [];
           usedH = 0;
@@ -1075,7 +1388,28 @@ const BookPreviewPagesComponent: React.FC<BookPreviewPagesProps> = ({
           __suppressTimeRow: !isLastPart,
           __splitFragKey: fragKey,
         });
-        usedH += headerH + fragH;
+        usedH += headerH + effectiveFragH;
+        if (String(baseMsg.text || '').length > 220) {
+          const pageBottomBudget =
+            availableHeight - splitVerticalBuffer - SPLIT_FRAGMENT_SAFETY - longDateFirstFragSafety;
+          debugLog('long-split-frag-commit', {
+            messageId: String(baseMsg._id ?? 'unknown'),
+            splitFragKey: fragKey,
+            splitGuard,
+            firstFragOfMsg,
+            prefixLength: prefix.length,
+            remainderLengthAfterCut: Math.max(0, remainder.length - prefix.length),
+            headerH,
+            fragH: Number(fragH.toFixed(2)),
+            longSplitFragFudge,
+            effectiveFragH: Number(effectiveFragH.toFixed(2)),
+            usedHAfter: Number(usedH.toFixed(2)),
+            pageBottomBudget: Number(pageBottomBudget.toFixed(2)),
+            exceedsBudgetAfterCommit: usedH > pageBottomBudget,
+            suppressTimeOnFrag: !isLastPart,
+            isLastPart,
+          });
+        }
         remainder = remainder.slice(prefix.length);
         firstFragOfMsg = false;
 
@@ -1093,6 +1427,86 @@ const BookPreviewPagesComponent: React.FC<BookPreviewPagesProps> = ({
     return result.length > 0 ? result : (deferredMessages.length > 0 ? [deferredMessages] : []);
   }, [paginationReady, msgHeights, deferredMessages, availableHeight, dateFormat, dateStyle, dateLanguage, imageLayout, containerWidth, meName, lineHeight, fontSize]);
   const totalPreviewPages = pages.length;
+
+  // Page-level estimated height diagnostics: compares pagination assumption vs actual on-screen content.
+  const debugEstimatedPageHeights = useMemo(() => {
+    if (!DEBUG_PREVIEW_LAYOUT || !paginationReady || pages.length === 0) return [];
+
+    const estimates: number[] = [];
+    let lastShownDate: string | null = null;
+    let lastShownYear: string | null = null;
+    let lastShownMonth: string | null = null;
+    let lastSenderName: string | null = null;
+    let lastSenderSide: boolean | null = null;
+
+    for (let pageIndex = 0; pageIndex < pages.length; pageIndex++) {
+      const pageMessages = pages[pageIndex];
+      let estimated = 0;
+      const headerSourceMsg = pageMessages.length > 0 ? pageMessages[0] : pages[pageIndex + 1]?.[0];
+
+      if (headerSourceMsg && dateFormat === 'full') {
+        const msgDateStr = headerSourceMsg.date || headerSourceMsg.sendingTime || '';
+        const ym = getYearMonth(msgDateStr);
+        if (ym) {
+          if (ym.year !== lastShownYear) {
+            estimated += YEAR_HEADER_ESTIMATE;
+            lastShownYear = ym.year;
+            lastSenderName = null;
+            lastSenderSide = null;
+          }
+          if (ym.month !== lastShownMonth) {
+            estimated += MONTH_HEADER_ESTIMATE;
+            lastShownMonth = ym.month;
+            lastSenderName = null;
+            lastSenderSide = null;
+          }
+        }
+        if (pageMessages.length === 0) {
+          const formattedDate = formatDate(msgDateStr, dateStyle, dateLanguage);
+          if (formattedDate && formattedDate !== lastShownDate) {
+            estimated += DATE_HEADER_ESTIMATE;
+            lastShownDate = formattedDate;
+            lastSenderName = null;
+            lastSenderSide = null;
+          }
+        }
+      }
+
+      for (const msg of pageMessages) {
+        const msgDateStr = msg.date || msg.sendingTime || '';
+        const formattedDate = formatDate(msgDateStr, dateStyle, dateLanguage);
+        if (dateFormat === 'full' && msgDateStr && formattedDate !== lastShownDate) {
+          estimated += DATE_HEADER_ESTIMATE;
+          lastShownDate = formattedDate;
+          lastSenderName = null;
+          lastSenderSide = null;
+        }
+
+        const currentSenderName = msg.senderName || null;
+        const currentSenderSide = isMessageFromMe(msg.senderName || '', meName);
+        const showSenderName = lastSenderName !== currentSenderName || lastSenderSide !== currentSenderSide;
+        const isMedia = msg.messageType === 'image' || msg.messageType === 'video';
+        const hideSenderName = isMedia || !showSenderName;
+        const heights = msgHeights[String(msg._id)];
+        estimated += heights ? (hideSenderName ? heights.noName : heights.withName) : 65;
+
+        lastSenderName = currentSenderName;
+        lastSenderSide = currentSenderSide;
+      }
+
+      estimates.push(estimated);
+    }
+
+    return estimates;
+  }, [
+    pages,
+    paginationReady,
+    msgHeights,
+    dateFormat,
+    dateStyle,
+    dateLanguage,
+    meName,
+  ]);
 
   // Render pages in batches of 10 to avoid crashing when pages are ready
   const PAGE_RENDER_BATCH = 10;
@@ -1137,6 +1551,34 @@ const BookPreviewPagesComponent: React.FC<BookPreviewPagesProps> = ({
     }
   }, [pages.length, deferredMessages.length, paginationReady, availableHeight, dimensions, scale, onPagesCalculated]);
 
+  React.useEffect(() => {
+    if (!DEBUG_PREVIEW_LAYOUT || !paginationReady || pages.length === 0) return;
+    debugLog('pagination-summary', {
+      totalPages: pages.length,
+      availableHeight,
+      pageHeight,
+      pageOverhead: PAGE_OVERHEAD,
+      containerWidth,
+      fontSize,
+      lineHeight,
+      dateFormat,
+      imageLayout,
+      measuredMessages: Object.keys(msgHeights).length,
+    });
+  }, [
+    paginationReady,
+    pages.length,
+    availableHeight,
+    pageHeight,
+    containerWidth,
+    fontSize,
+    lineHeight,
+    dateFormat,
+    imageLayout,
+    msgHeights,
+    debugLog,
+  ]);
+
   return (
     <>
     {/* Hidden measurement pass — pixel-perfect clone of the actual bubble render.
@@ -1153,6 +1595,8 @@ const BookPreviewPagesComponent: React.FC<BookPreviewPagesProps> = ({
           const hasImageUri = typeof rawMedia === 'string' && rawMedia.length > 0;
           const imageOnly = isImage && hasImageUri;
           const isMedia = isImage || isVideo;
+          const mediaDisplayText = stripMediaTitleLine(String(msg.text || ''), isVideoOrAudio);
+          const showMediaText = isVideoOrAudio && mediaDisplayText.length > 0;
 
           // Time content — mirrors render pass exactly
           const timeContent = showTime && dateFormat === 'full'
@@ -1166,13 +1610,32 @@ const BookPreviewPagesComponent: React.FC<BookPreviewPagesProps> = ({
             <>
               {/* Sender name — only in the "withName" variant, and never for media */}
               {withName && !isMedia && (
-                <Text style={{ fontWeight: '600', fontSize: fontSize - 1, marginBottom: 2 }}>
+                <Text
+                  numberOfLines={1}
+                  style={{
+                    fontWeight: '600',
+                    fontSize: fontSize - 1,
+                    marginBottom: 2,
+                    fontFamily,
+                    fontStyle: 'normal',
+                  }}
+                >
                   {msg.senderName || ''}
                 </Text>
               )}
               {/* Text — with paddingRight:60 matching styles.messageText */}
               {!imageOnly && !isVideoOrAudio && (
-                <Text style={{ fontSize, lineHeight: fontSize * lineHeight, paddingRight: 60, flexWrap: 'wrap' }}>
+                <Text
+                  style={{
+                    fontSize,
+                    lineHeight: fontSize * lineHeight,
+                    paddingRight: 60,
+                    flexWrap: 'wrap',
+                    fontFamily,
+                    fontWeight: messageBold ? '700' : '400',
+                    fontStyle: messageItalic ? 'italic' : 'normal',
+                  }}
+                >
                   {msg.text || ''}
                 </Text>
               )}
@@ -1184,11 +1647,37 @@ const BookPreviewPagesComponent: React.FC<BookPreviewPagesProps> = ({
               {isVideoOrAudio && (
                 <View style={{ flexDirection: 'row', alignItems: 'center', paddingVertical: 8, gap: 12, height: 120 + 16 + 18 }} />
               )}
+              {showMediaText && (
+                <Text
+                  style={{
+                    fontSize,
+                    lineHeight: fontSize * lineHeight,
+                    paddingRight: 60,
+                    flexWrap: 'wrap',
+                    fontFamily,
+                    fontWeight: messageBold ? '700' : '400',
+                    fontStyle: messageItalic ? 'italic' : 'normal',
+                  }}
+                >
+                  {mediaDisplayText}
+                </Text>
+              )}
               {/* Time row — marginTop:-20 overlaps last text line */}
               {timeContent ? (
                 <View style={{ flexDirection: 'row', justifyContent: 'flex-end', alignItems: 'flex-end', marginTop: -20 }}>
                   <Text style={{ flex: 1 }} />
-                  <Text style={{ fontSize: fontSize - 2, opacity: 0.7, paddingLeft: 8 }}>{timeContent}</Text>
+                  <Text
+                    style={{
+                      fontSize: fontSize - 2,
+                      opacity: 0.7,
+                      paddingLeft: 8,
+                      fontFamily,
+                      fontWeight: '400',
+                      fontStyle: 'normal',
+                    }}
+                  >
+                    {timeContent}
+                  </Text>
                 </View>
               ) : null}
             </>
@@ -1204,8 +1693,8 @@ const BookPreviewPagesComponent: React.FC<BookPreviewPagesProps> = ({
           // For measurement, use the exact pixel width the bubble will render at (92% of containerWidth)
           // so the measured height matches the actual rendered height precisely.
           const measureBubbleWidth = isVideoOrAudio
-            ? Math.max(Math.round(containerWidth * 0.92), 260)
-            : Math.round(containerWidth * 0.92);
+            ? Math.max(Math.round(pageContentWidth * 0.92), 260)
+            : Math.round(pageContentWidth * 0.92);
 
           return [
             // Variant 1: with sender name
@@ -1304,8 +1793,35 @@ const BookPreviewPagesComponent: React.FC<BookPreviewPagesProps> = ({
               // Year header (if year changed)
               if (yearMonth.year !== lastShownYear) {
                 const yearTitle = customTitles.years?.[yearMonth.year];
+            if (DEBUG_PREVIEW_LAYOUT) {
+              debugLog('render-year-header', {
+                pageIndex: pageIndex + 1,
+                year: yearMonth.year,
+                hasYearSubtitle: !!yearTitle?.text,
+                yearEstimate: YEAR_HEADER_ESTIMATE,
+              });
+            }
                 pageElements.push(
-                  <View key={`year-${yearMonth.year}`} style={styles.yearHeader}>
+                  <View
+                    key={`year-${yearMonth.year}`}
+                    style={styles.yearHeader}
+                    onLayout={
+                      DEBUG_PREVIEW_LAYOUT
+                        ? (e) => {
+                            const key = `year:${pageIndex}:${yearMonth.year}`;
+                            if (debugHeaderLayoutKeysRef.current.has(key)) return;
+                            debugHeaderLayoutKeysRef.current.add(key);
+                            debugLog('header-layout-height', {
+                              pageIndex: pageIndex + 1,
+                              headerType: 'year',
+                              year: yearMonth.year,
+                              estimatedHeight: YEAR_HEADER_ESTIMATE,
+                              actualHeight: Number(e.nativeEvent.layout.height.toFixed(2)),
+                            });
+                          }
+                        : undefined
+                    }
+                  >
                     <Text style={[styles.yearText, { fontSize: fontSize + 12, color: colors.text || '#1a1a1a' }]}>
                       {yearMonth.year}
                     </Text>
@@ -1336,8 +1852,36 @@ const BookPreviewPagesComponent: React.FC<BookPreviewPagesProps> = ({
               if (yearMonth.month !== lastShownMonth) {
                 const monthTitle = customTitles.months?.[yearMonth.month];
                 const monthName = getMonthName(yearMonth.monthNum, dateLanguage);
+                if (DEBUG_PREVIEW_LAYOUT) {
+                  debugLog('render-month-header', {
+                    pageIndex: pageIndex + 1,
+                    month: yearMonth.month,
+                    monthName,
+                    hasMonthSubtitle: !!monthTitle?.text,
+                    monthEstimate: MONTH_HEADER_ESTIMATE,
+                  });
+                }
                 pageElements.push(
-                  <View key={`month-${yearMonth.month}`} style={styles.monthHeader}>
+                  <View
+                    key={`month-${yearMonth.month}`}
+                    style={styles.monthHeader}
+                    onLayout={
+                      DEBUG_PREVIEW_LAYOUT
+                        ? (e) => {
+                            const key = `month:${pageIndex}:${yearMonth.month}`;
+                            if (debugHeaderLayoutKeysRef.current.has(key)) return;
+                            debugHeaderLayoutKeysRef.current.add(key);
+                            debugLog('header-layout-height', {
+                              pageIndex: pageIndex + 1,
+                              headerType: 'month',
+                              month: yearMonth.month,
+                              estimatedHeight: MONTH_HEADER_ESTIMATE,
+                              actualHeight: Number(e.nativeEvent.layout.height.toFixed(2)),
+                            });
+                          }
+                        : undefined
+                    }
+                  >
                     <Text style={[styles.monthText, { fontSize: fontSize + 6, color: colors.text || '#1a1a1a' }]}>
                       {monthName}
                     </Text>
@@ -1370,8 +1914,35 @@ const BookPreviewPagesComponent: React.FC<BookPreviewPagesProps> = ({
               const msgDateStr = headerSourceMsg.date || headerSourceMsg.sendingTime || '';
               const formattedDate = formatDate(msgDateStr, dateStyle, dateLanguage);
               if (formattedDate && formattedDate !== lastShownDate) {
+                if (DEBUG_PREVIEW_LAYOUT) {
+                  debugLog('render-date-header-only-page', {
+                    pageIndex: pageIndex + 1,
+                    formattedDate,
+                    dateEstimate: DATE_HEADER_ESTIMATE,
+                  });
+                }
                 pageElements.push(
-                  <View key={`date-header-only-${pageIndex}`} style={styles.dateHeader}>
+                  <View
+                    key={`date-header-only-${pageIndex}`}
+                    style={styles.dateHeader}
+                    onLayout={
+                      DEBUG_PREVIEW_LAYOUT
+                        ? (e) => {
+                            const key = `date-only:${pageIndex}:${formattedDate}`;
+                            if (debugHeaderLayoutKeysRef.current.has(key)) return;
+                            debugHeaderLayoutKeysRef.current.add(key);
+                            debugLog('header-layout-height', {
+                              pageIndex: pageIndex + 1,
+                              headerType: 'date',
+                              formattedDate,
+                              estimatedHeight: DATE_HEADER_ESTIMATE,
+                              actualHeight: Number(e.nativeEvent.layout.height.toFixed(2)),
+                              headerOnlyPage: true,
+                            });
+                          }
+                        : undefined
+                    }
+                  >
                     <Text style={[styles.dateHeaderText, { fontSize: fontSize + 1, color: colors.text || '#666' }]}>
                       {formattedDate}
                     </Text>
@@ -1405,8 +1976,47 @@ const BookPreviewPagesComponent: React.FC<BookPreviewPagesProps> = ({
             
             // Add date header if needed
             if (showDateHeader) {
+              if (DEBUG_PREVIEW_LAYOUT) {
+                debugLog('render-date-header', {
+                  pageIndex: pageIndex + 1,
+                  formattedDate,
+                  dateEstimate: DATE_HEADER_ESTIMATE,
+                  messageId: String(msg._id),
+                  textLength: String(msg.text || '').length,
+                });
+                if (String(msg.text || '').length > 220) {
+                  debugLog('render-long-date-message', {
+                    pageIndex: pageIndex + 1,
+                    messageId: String(msg._id),
+                    splitFragKey: (msg as any).__splitFragKey || null,
+                    formattedDate,
+                    textLength: String(msg.text || '').length,
+                    suppressTimeRow: !!msg.__suppressTimeRow,
+                  });
+                }
+              }
               elements.push(
-                <View key={`date-${globalMessageIndex}`} style={styles.dateHeader}>
+                <View
+                  key={`date-${globalMessageIndex}`}
+                  style={styles.dateHeader}
+                  onLayout={
+                    DEBUG_PREVIEW_LAYOUT
+                      ? (e) => {
+                          const key = `date:${pageIndex}:${formattedDate}`;
+                          if (debugHeaderLayoutKeysRef.current.has(key)) return;
+                          debugHeaderLayoutKeysRef.current.add(key);
+                          debugLog('header-layout-height', {
+                            pageIndex: pageIndex + 1,
+                            headerType: 'date',
+                            formattedDate,
+                            estimatedHeight: DATE_HEADER_ESTIMATE,
+                            actualHeight: Number(e.nativeEvent.layout.height.toFixed(2)),
+                            headerOnlyPage: false,
+                          });
+                        }
+                      : undefined
+                  }
+                >
                   <Text style={[styles.dateHeaderText, { fontSize: fontSize + 1, color: colors.text || '#666' }]}>
                     {formattedDate}
                   </Text>
@@ -1471,15 +2081,7 @@ const BookPreviewPagesComponent: React.FC<BookPreviewPagesProps> = ({
               }
             }
             const isVideoOrAudio = isVideo || isAudio;
-            // For video/audio: strip the filename line (e.g. "VID-xxx.mp4 (file attached)")
-            // but keep any real caption text that follows it.
-            const displayText = isVideoOrAudio && typeof text === 'string'
-              ? text
-                  .split('\n')
-                  .filter(line => !/\.(mp4|opus|ogg|m4a|aac|wav|mov|avi|mkv|3gp)\s*\(file attached\)/i.test(line))
-                  .join('\n')
-                  .trim()
-              : text;
+            const displayText = stripMediaTitleLine(text, isVideoOrAudio);
             const showText = isImage
               ? !imageUri
               : isVideoOrAudio
@@ -1503,6 +2105,53 @@ const BookPreviewPagesComponent: React.FC<BookPreviewPagesProps> = ({
                 ]}
               >
                 <View
+                  onLayout={
+                    DEBUG_PREVIEW_LAYOUT
+                      ? (e) => {
+                          const bubbleH = e.nativeEvent.layout.height;
+                          const expectedPair = msgHeights[String(msg._id)];
+                          if (!expectedPair) return;
+                          const expected = (hideSenderName ? expectedPair.noName : expectedPair.withName) - messageGap;
+                          const delta = bubbleH - expected;
+                          const splitFragKey = (msg as any).__splitFragKey || 'no-split';
+                          const debugKey = `${pageIndex}-${String(msg._id)}-${splitFragKey}-${hideSenderName ? 'noName' : 'withName'}-${String(msg.text || '').length}-${msg.__suppressTimeRow ? 'no-time' : 'with-time'}`;
+                          if (Math.abs(delta) > 6 && !debugLoggedBubbleKeysRef.current.has(debugKey)) {
+                            debugLoggedBubbleKeysRef.current.add(debugKey);
+                            debugLog('bubble-height-mismatch', {
+                              pageIndex: pageIndex + 1,
+                              messageId: String(msg._id),
+                              splitFragKey: (msg as any).__splitFragKey || null,
+                              sender: msg.senderName || 'unknown',
+                              messageType: msg.messageType || 'text',
+                              hideSenderName,
+                              expectedBubbleHeight: Number(expected.toFixed(2)),
+                              actualBubbleHeight: Number(bubbleH.toFixed(2)),
+                              delta: Number(delta.toFixed(2)),
+                              textLength: String(msg.text || '').length,
+                              suppressTimeRow: !!msg.__suppressTimeRow,
+                            });
+                          }
+                          if (isVideoOrAudio) {
+                            const mediaKey = `${pageIndex}-${String(msg._id)}-${splitFragKey}-${hideSenderName ? 'noName' : 'withName'}`;
+                            if (!debugMediaLayoutKeysRef.current.has(mediaKey)) {
+                              debugMediaLayoutKeysRef.current.add(mediaKey);
+                              debugLog('media-bubble-layout', {
+                                pageIndex: pageIndex + 1,
+                                messageId: String(msg._id),
+                                messageType: msg.messageType || 'unknown',
+                                splitFragKey: (msg as any).__splitFragKey || null,
+                                hideSenderName,
+                                expectedBubbleHeight: Number(expected.toFixed(2)),
+                                actualBubbleHeight: Number(bubbleH.toFixed(2)),
+                                delta: Number(delta.toFixed(2)),
+                                textLength: String(msg.text || '').length,
+                                hasMonthHeader: pageIndex > 0,
+                              });
+                            }
+                          }
+                        }
+                      : undefined
+                  }
                   style={[
                     styles.bubble,
                     {
@@ -1653,8 +2302,49 @@ const BookPreviewPagesComponent: React.FC<BookPreviewPagesProps> = ({
                 },
               ]}
             >
-              {pageElements}
-              {messageElements}
+              <View
+                onLayout={
+                  DEBUG_PREVIEW_LAYOUT
+                    ? (e) => {
+                        const contentHeight = e.nativeEvent.layout.height;
+                        const innerAvailableHeight = pageHeight - 16 - 24; // page paddingTop + paddingBottom in render
+                        const estimatedHeight = debugEstimatedPageHeights[pageIndex];
+                        const exceeds = contentHeight - innerAvailableHeight;
+                        const hasMediaOnPage = pageMessages.some(
+                          (m) => m.messageType === 'video' || m.messageType === 'audio'
+                        );
+                        debugPageMetricsRef.current[pageIndex] = {
+                          ...debugPageMetricsRef.current[pageIndex],
+                          contentHeight,
+                          estimatedHeight,
+                        };
+                        if (
+                          exceeds > 2 ||
+                          Math.abs((estimatedHeight ?? 0) - contentHeight) > 10 ||
+                          (hasMediaOnPage && exceeds > -8)
+                        ) {
+                          debugLog('page-height-check', {
+                            pageIndex: pageIndex + 1,
+                            pageMessages: pageMessages.length,
+                            hasMediaOnPage,
+                            estimatedContentHeight: estimatedHeight !== undefined ? Number(estimatedHeight.toFixed(2)) : null,
+                            actualContentHeight: Number(contentHeight.toFixed(2)),
+                            innerAvailableHeight: Number(innerAvailableHeight.toFixed(2)),
+                            overflowBy: Number(exceeds.toFixed(2)),
+                            remainingSpace: Number((innerAvailableHeight - contentHeight).toFixed(2)),
+                            estimateVsActualDelta:
+                              estimatedHeight !== undefined
+                                ? Number((contentHeight - estimatedHeight).toFixed(2))
+                                : null,
+                          });
+                        }
+                      }
+                    : undefined
+                }
+              >
+                {pageElements}
+                {messageElements}
+              </View>
 
               {showPageNumbers && (
                 <Text

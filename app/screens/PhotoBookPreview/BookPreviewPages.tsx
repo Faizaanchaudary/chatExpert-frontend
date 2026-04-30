@@ -10,7 +10,7 @@ import {
   Image,
   InteractionManager,
   ActivityIndicator,
-  ScrollView,
+  FlatList,
   Animated,
   PanResponder,
   TouchableOpacity,
@@ -38,7 +38,7 @@ const PAGE_DIMENSIONS = {
 // The buffer covers: last message marginBottom (3), page number area at bottom:8,
 // and a small cushion so the last bubble never visually touches the bottom edge.
 const PAGE_OVERHEAD = 48;
-const DEBUG_PREVIEW_LAYOUT = __DEV__;
+const DEBUG_PREVIEW_LAYOUT = false;
 // Header estimates for pagination (tuned to match rendered blocks with current styles).
 // Previous values under-counted by ~7px per header in debug runs, causing occasional clipping.
 const YEAR_HEADER_ESTIMATE = 67;
@@ -49,7 +49,7 @@ const SPLIT_FRAGMENT_SAFETY = 56;
 const PAGE_NUMBER_RESERVE = 12;
 const ATOMIC_BOTTOM_SAFETY = 8;
 const LONG_TEXT_ATOMIC_SAFETY = 18;
-const VERY_LONG_TEXT_ATOMIC_SAFETY = 12;
+const VERY_LONG_TEXT_ATOMIC_SAFETY = 15;
 const LONG_DATE_FIRST_FRAG_SAFETY = 42;
 const LONG_SPLIT_FRAGMENT_FUDGE = 44;
 const LONG_SPLIT_LAST_FRAGMENT_FUDGE = 28;
@@ -504,6 +504,30 @@ interface BookPreviewPagesProps {
   onPagesCalculated?: (pages: IMessage[][]) => void;
 }
 
+/** Pre-computed per-page header and sender-tracking state so FlatList renderItem is pure. */
+interface PageHeaderState {
+  showYear: boolean;
+  showMonth: boolean;
+  showDate: boolean;
+  yearValue: string | null;
+  monthValue: string | null;
+  monthNum: number;
+  dateValue: string | null;
+  /** The last date shown BEFORE this page starts (used to seed lastShownDate in renderItem). */
+  prevDate: string | null;
+  /** Sender name at the START of this page (carried from previous page end). */
+  initialSenderName: string | null;
+  initialSenderSide: boolean | null;
+}
+
+interface PageData {
+  /** Unique stable key for FlatList. */
+  key: string;
+  messages: IMessage[];
+  pageIndex: number;
+  headerState: PageHeaderState;
+}
+
 const BookPreviewPagesComponent: React.FC<BookPreviewPagesProps> = ({
   messages,
   resolvedConfig,
@@ -558,7 +582,7 @@ const BookPreviewPagesComponent: React.FC<BookPreviewPagesProps> = ({
   useEffect(() => { renderedUpToRef.current = renderedUpTo; }, [renderedUpTo]);
 
   // ── Scrollbar state ──────────────────────────────────────────────────────────
-  const pagesScrollRef = useRef<ScrollView>(null);
+  const pagesScrollRef = useRef<FlatList<PageData>>(null);
   const scrollYPages = useRef(new Animated.Value(0)).current;
   const [pagesContentHeight, setPagesContentHeight] = useState(0);
   const [pagesViewHeight, setPagesViewHeight] = useState(0);
@@ -615,8 +639,10 @@ const BookPreviewPagesComponent: React.FC<BookPreviewPagesProps> = ({
 
   const dragStartScrollOffset = useRef(0);
   const dragStartGestureY = useRef(0);
+  const isDraggingThumb = useRef(false);
   const thumbTravelRef = useRef(thumbTravel);
   const maxScrollOffsetRef = useRef(maxScrollOffset);
+  // Track current scroll offset directly from onScroll — more reliable than Animated.Value listener
   const scrollYPagesValue = useRef(0);
   useEffect(() => { thumbTravelRef.current = thumbTravel; }, [thumbTravel]);
   useEffect(() => { maxScrollOffsetRef.current = maxScrollOffset; }, [maxScrollOffset]);
@@ -632,7 +658,8 @@ const BookPreviewPagesComponent: React.FC<BookPreviewPagesProps> = ({
       onMoveShouldSetPanResponder: () => true,
       onMoveShouldSetPanResponderCapture: () => true,
       onPanResponderGrant: (e) => {
-        setSeekMode(true);
+        isDraggingThumb.current = true;
+        // Record where the finger started and what the scroll offset was at that moment
         dragStartScrollOffset.current = scrollYPagesValue.current;
         dragStartGestureY.current = e.nativeEvent.pageY;
       },
@@ -640,13 +667,20 @@ const BookPreviewPagesComponent: React.FC<BookPreviewPagesProps> = ({
         const travel = thumbTravelRef.current;
         const maxOff = maxScrollOffsetRef.current;
         if (travel <= 0 || maxOff <= 0) return;
+        // dy relative to where the drag STARTED — not relative to track top
         const dy = e.nativeEvent.pageY - dragStartGestureY.current;
         const scrollDelta = (dy / travel) * maxOff;
         const newOffset = Math.max(0, Math.min(maxOff, dragStartScrollOffset.current + scrollDelta));
-        pagesScrollRef.current?.scrollTo({ y: newOffset, animated: false });
+        pagesScrollRef.current?.scrollToOffset({ offset: newOffset, animated: false });
       },
       onPanResponderTerminationRequest: () => false,
-      onPanResponderRelease: () => {},
+      onPanResponderRelease: () => {
+        // Small delay so the onPress on the track fires after this flag is checked
+        setTimeout(() => { isDraggingThumb.current = false; }, 50);
+      },
+      onPanResponderTerminate: () => {
+        setTimeout(() => { isDraggingThumb.current = false; }, 50);
+      },
     })
   ).current;
   // ─────────────────────────────────────────────────────────────────────────────
@@ -889,7 +923,7 @@ const BookPreviewPagesComponent: React.FC<BookPreviewPagesProps> = ({
   // Reserve extra space for page number row when enabled (prevents end-of-page clipping).
   const pageNumberReserve = showPageNumbers ? PAGE_NUMBER_RESERVE : 0;
   const availableHeight = pageHeight - PAGE_OVERHEAD - pageNumberReserve;
-  const pages: IMessage[][] = useMemo(() => {
+  const pages: PageData[] = useMemo(() => {
     if (!paginationReady) return [];
 
     const result: IMessage[][] = [];
@@ -987,6 +1021,7 @@ const BookPreviewPagesComponent: React.FC<BookPreviewPagesProps> = ({
         let rawMsgH = item.height;
         const atomicTextLen = String(firstMsg.text || '').length;
         const isAtomicMedia = firstMsg.messageType === 'video' || firstMsg.messageType === 'audio';
+        const isAtomicSingle = item.messages.length === 1;
         if (isSplittableTextMessage(firstMsg) && atomicTextLen > 180) {
           rawMsgH += LONG_TEXT_ATOMIC_SAFETY;
           if (atomicTextLen > 350) {
@@ -1038,6 +1073,22 @@ const BookPreviewPagesComponent: React.FC<BookPreviewPagesProps> = ({
               msgDateStr,
               formattedDate: formattedDate || null,
             });
+          }
+        }
+
+        // Re-evaluate single-message height using live pagination sender state.
+        // This keeps name/no-name choice aligned with actual render after
+        // year/month/date boundary resets and prevents under-count overflow.
+        if (isAtomicSingle) {
+          const heights = msgHeights[String(firstMsg._id)];
+          if (heights) {
+            const isVisualMedia = firstMsg.messageType === 'image' || firstMsg.messageType === 'video';
+            const itemSenderName = firstMsg.senderName || null;
+            const itemSenderSide = isMessageFromMe(firstMsg.senderName || '', meName);
+            const showNameNow =
+              !isVisualMedia &&
+              (paginationLastSenderName !== itemSenderName || paginationLastSenderSide !== itemSenderSide);
+            rawMsgH = showNameNow ? heights.withName : heights.noName;
           }
         }
 
@@ -1304,8 +1355,8 @@ const BookPreviewPagesComponent: React.FC<BookPreviewPagesProps> = ({
           prefix = remainder.slice(0, Math.max(1, takeEnd));
         }
 
-        const isLastPart = prefix.length >= remainder.length;
-        const fragH = estimateTextSliceHeightPreview(
+        let isLastPart = prefix.length >= remainder.length;
+        let fragH = estimateTextSliceHeightPreview(
           containerWidth,
           fontSize,
           lineHeight,
@@ -1313,11 +1364,11 @@ const BookPreviewPagesComponent: React.FC<BookPreviewPagesProps> = ({
           withNameNow,
           messageGap
         );
-        const longSplitFragFudge =
+        let longSplitFragFudge =
           String(baseMsg.text || '').length > 220
             ? (isLastPart ? LONG_SPLIT_LAST_FRAGMENT_FUDGE : LONG_SPLIT_FRAGMENT_FUDGE)
             : 0;
-        const effectiveFragH = fragH + longSplitFragFudge;
+        let effectiveFragH = fragH + longSplitFragFudge;
 
         if (String(baseMsg.text || '').length > 220) {
           const splitKey = `${String(baseMsg._id)}:${splitGuard}:${firstFragOfMsg ? 'first' : 'next'}`;
@@ -1374,6 +1425,35 @@ const BookPreviewPagesComponent: React.FC<BookPreviewPagesProps> = ({
 
         const pageBottomBudget =
           availableHeight - splitVerticalBuffer - SPLIT_FRAGMENT_SAFETY - longDateFirstFragSafety;
+
+        // Hard fallback: never commit an oversized first fragment on an empty page.
+        // Without this, we can enter a long loop of tiny 1-char fragments and appear stuck.
+        if (currentPage.length === 0 && usedH === 0 && headerH === 0 && effectiveFragH > pageBottomBudget) {
+          let fallbackLen = prefix.length;
+          let attempts = 0;
+          while (attempts < 8 && fallbackLen > 1 && effectiveFragH > pageBottomBudget) {
+            attempts += 1;
+            const targetLen = Math.max(1, Math.floor(fallbackLen * 0.7));
+            const adjusted = snapUtf16PrefixEnd(remainder, targetLen);
+            fallbackLen = Math.max(1, adjusted);
+            prefix = remainder.slice(0, fallbackLen);
+            isLastPart = prefix.length >= remainder.length;
+            fragH = estimateTextSliceHeightPreview(
+              containerWidth,
+              fontSize,
+              lineHeight,
+              prefix,
+              withNameNow,
+              messageGap
+            );
+            longSplitFragFudge =
+              String(baseMsg.text || '').length > 220
+                ? (isLastPart ? LONG_SPLIT_LAST_FRAGMENT_FUDGE : LONG_SPLIT_FRAGMENT_FUDGE)
+                : 0;
+            effectiveFragH = fragH + longSplitFragFudge;
+          }
+        }
+
         if (currentPage.length > 0 && usedH + headerH + effectiveFragH > pageBottomBudget) {
           result.push(currentPage);
           currentPage = [];
@@ -1424,60 +1504,127 @@ const BookPreviewPagesComponent: React.FC<BookPreviewPagesProps> = ({
     }
 
     if (currentPage.length > 0) result.push(currentPage);
-    return result.length > 0 ? result : (deferredMessages.length > 0 ? [deferredMessages] : []);
-  }, [paginationReady, msgHeights, deferredMessages, availableHeight, dateFormat, dateStyle, dateLanguage, imageLayout, containerWidth, meName, lineHeight, fontSize]);
-  const totalPreviewPages = pages.length;
+    const rawPages = result.length > 0 ? result : (deferredMessages.length > 0 ? [deferredMessages] : []);
 
-  // Page-level estimated height diagnostics: compares pagination assumption vs actual on-screen content.
-  const debugEstimatedPageHeights = useMemo(() => {
-    if (!DEBUG_PREVIEW_LAYOUT || !paginationReady || pages.length === 0) return [];
+    // ── Pre-compute per-page header state so FlatList renderItem is pure ──────
+    const pageDataList: PageData[] = [];
+    let phLastYear: string | null = null;
+    let phLastMonth: string | null = null;
+    let phLastDate: string | null = null;
+    let phLastSenderName: string | null = null;
+    let phLastSenderSide: boolean | null = null;
 
-    const estimates: number[] = [];
-    let lastShownDate: string | null = null;
-    let lastShownYear: string | null = null;
-    let lastShownMonth: string | null = null;
-    let lastSenderName: string | null = null;
-    let lastSenderSide: boolean | null = null;
+    for (let pi = 0; pi < rawPages.length; pi++) {
+      const pageMessages = rawPages[pi];
+      const headerSourceMsg = pageMessages.length > 0 ? pageMessages[0] : rawPages[pi + 1]?.[0];
 
-    for (let pageIndex = 0; pageIndex < pages.length; pageIndex++) {
-      const pageMessages = pages[pageIndex];
-      let estimated = 0;
-      const headerSourceMsg = pageMessages.length > 0 ? pageMessages[0] : pages[pageIndex + 1]?.[0];
+      let showYear = false;
+      let showMonth = false;
+      let showDate = false;
+      let yearValue: string | null = null;
+      let monthValue: string | null = null;
+      let monthNum = 0;
+      let dateValue: string | null = null;
 
       if (headerSourceMsg && dateFormat === 'full') {
         const msgDateStr = headerSourceMsg.date || headerSourceMsg.sendingTime || '';
         const ym = getYearMonth(msgDateStr);
         if (ym) {
-          if (ym.year !== lastShownYear) {
-            estimated += YEAR_HEADER_ESTIMATE;
-            lastShownYear = ym.year;
-            lastSenderName = null;
-            lastSenderSide = null;
+          if (ym.year !== phLastYear) {
+            showYear = true;
+            yearValue = ym.year;
+            phLastYear = ym.year;
+            phLastSenderName = null;
+            phLastSenderSide = null;
           }
-          if (ym.month !== lastShownMonth) {
-            estimated += MONTH_HEADER_ESTIMATE;
-            lastShownMonth = ym.month;
-            lastSenderName = null;
-            lastSenderSide = null;
+          if (ym.month !== phLastMonth) {
+            showMonth = true;
+            monthValue = ym.month;
+            monthNum = ym.monthNum;
+            phLastMonth = ym.month;
+            phLastSenderName = null;
+            phLastSenderSide = null;
           }
         }
         if (pageMessages.length === 0) {
-          const formattedDate = formatDate(msgDateStr, dateStyle, dateLanguage);
-          if (formattedDate && formattedDate !== lastShownDate) {
-            estimated += DATE_HEADER_ESTIMATE;
-            lastShownDate = formattedDate;
-            lastSenderName = null;
-            lastSenderSide = null;
+          const fd = formatDate(msgDateStr, dateStyle, dateLanguage);
+          if (fd && fd !== phLastDate) {
+            showDate = true;
+            dateValue = fd;
+            phLastDate = fd;
+            phLastSenderName = null;
+            phLastSenderSide = null;
           }
         }
       }
 
+      pageDataList.push({
+        key: `page-${pi}`,
+        messages: pageMessages,
+        pageIndex: pi,
+        headerState: {
+          showYear,
+          showMonth,
+          showDate,
+          yearValue,
+          monthValue,
+          monthNum,
+          dateValue,
+          prevDate: phLastDate,
+          initialSenderName: phLastSenderName,
+          initialSenderSide: phLastSenderSide,
+        },
+      });
+
+      // Advance sender/date tracking past all messages on this page
+      for (const msg of pageMessages) {
+        const msgDateStr = msg.date || msg.sendingTime || '';
+        if (dateFormat === 'full' && msgDateStr) {
+          const fd = formatDate(msgDateStr, dateStyle, dateLanguage);
+          if (fd && fd !== phLastDate) {
+            phLastDate = fd;
+            phLastSenderName = null;
+            phLastSenderSide = null;
+          }
+        }
+        phLastSenderName = msg.senderName || null;
+        phLastSenderSide = isMessageFromMe(msg.senderName || '', meName);
+      }
+    }
+
+    return pageDataList;
+  }, [paginationReady, msgHeights, deferredMessages, availableHeight, dateFormat, dateStyle, dateLanguage, imageLayout, containerWidth, meName, lineHeight, fontSize]);
+  const totalPreviewPages = pages.length;
+
+  // Page-level estimated height diagnostics: uses pre-computed header state from PageData.
+  const debugEstimatedPageHeights = useMemo(() => {
+    if (!DEBUG_PREVIEW_LAYOUT || !paginationReady || pages.length === 0) return [];
+
+    const estimates: number[] = [];
+    let lastSenderName: string | null = null;
+    let lastSenderSide: boolean | null = null;
+
+    for (const pageData of pages) {
+      const { messages: pageMessages, headerState } = pageData;
+      let estimated = 0;
+
+      if (headerState.showYear) estimated += YEAR_HEADER_ESTIMATE;
+      if (headerState.showMonth) estimated += MONTH_HEADER_ESTIMATE;
+      if (headerState.showDate) estimated += DATE_HEADER_ESTIMATE;
+
+      if (headerState.showYear || headerState.showMonth || headerState.showDate) {
+        lastSenderName = null;
+        lastSenderSide = null;
+      }
+
+      let localLastDate: string | null = headerState.showDate ? headerState.dateValue : headerState.prevDate;
+
       for (const msg of pageMessages) {
         const msgDateStr = msg.date || msg.sendingTime || '';
         const formattedDate = formatDate(msgDateStr, dateStyle, dateLanguage);
-        if (dateFormat === 'full' && msgDateStr && formattedDate !== lastShownDate) {
+        if (dateFormat === 'full' && msgDateStr && formattedDate !== localLastDate) {
           estimated += DATE_HEADER_ESTIMATE;
-          lastShownDate = formattedDate;
+          localLastDate = formattedDate;
           lastSenderName = null;
           lastSenderSide = null;
         }
@@ -1508,45 +1655,13 @@ const BookPreviewPagesComponent: React.FC<BookPreviewPagesProps> = ({
     meName,
   ]);
 
-  // Render pages in batches of 10 to avoid crashing when pages are ready
-  const PAGE_RENDER_BATCH = 10;
-  const [renderedPageCount, setRenderedPageCount] = useState(PAGE_RENDER_BATCH);
-  const [seekMode, setSeekMode] = useState(false);
-  const pageRenderTimerRef = useRef<any>(null);
-
-  useEffect(() => {
-    if (!paginationReady || pages.length === 0) return;
-    setSeekMode(false);
-    setRenderedPageCount(PAGE_RENDER_BATCH);
-  }, [paginationReady, pages.length]);
-
-  useEffect(() => {
-    if (seekMode && paginationReady && renderedPageCount < pages.length) {
-      setRenderedPageCount(pages.length);
-      return;
-    }
-    if (!paginationReady || renderedPageCount >= pages.length) return;
-    pageRenderTimerRef.current = setTimeout(() => {
-      setRenderedPageCount(prev => Math.min(prev + PAGE_RENDER_BATCH, pages.length));
-    }, 100);
-    return () => { if (pageRenderTimerRef.current) clearTimeout(pageRenderTimerRef.current); };
-  }, [renderedPageCount, paginationReady, pages.length, seekMode]);
-
-  // Console log for page calculation comparison
+  // Fire onPagesCalculated with the raw IMessage[][] extracted from PageData
   React.useEffect(() => {
     if (paginationReady && pages.length > 0) {
-      
-      // NEW: Calculate how many messages fit in 200 pages
-      if (pages.length > 200) {
-        let messagesIn200Pages = 0;
-        for (let i = 0; i < Math.min(200, pages.length); i++) {
-          messagesIn200Pages += pages[i].length;
-        }
-      }
-
       if (onPagesCalculated) {
+        const rawPages = pages.map(p => p.messages);
         console.log(`[BookPreviewPages] firing onPagesCalculated — pages:${pages.length} msgs:${deferredMessages.length} paginationReady:${paginationReady}`);
-        onPagesCalculated(pages);
+        onPagesCalculated(rawPages);
       }
     }
   }, [pages.length, deferredMessages.length, paginationReady, availableHeight, dimensions, scale, onPagesCalculated]);
@@ -1747,216 +1862,193 @@ const BookPreviewPagesComponent: React.FC<BookPreviewPagesProps> = ({
           <Text style={styles.scrollWaitText}>⏳ Calculating pages, scroll available soon…</Text>
         </View>
       )}
-      <ScrollView
+      {isDeferringMessages && (
+        <View style={styles.deferLoading}>
+          <ActivityIndicator size="small" color={colors.text || '#1a1a1a'} />
+          <Text style={[styles.deferLoadingText, { color: colors.text || '#1a1a1a' }]}>Loading selected book...</Text>
+        </View>
+      )}
+      <FlatList<PageData>
         ref={pagesScrollRef}
+        data={paginationReady ? pages : []}
+        keyExtractor={(item) => item.key}
         showsVerticalScrollIndicator={false}
         scrollEventThrottle={16}
         scrollEnabled={paginationReady}
-        onScroll={Animated.event(
-          [{ nativeEvent: { contentOffset: { y: scrollYPages } } }],
-          { useNativeDriver: false }
-        )}
-        onContentSizeChange={(_, h) => setPagesContentHeight(h)}
+        windowSize={21}
+        initialNumToRender={20}
+        maxToRenderPerBatch={10}
+        updateCellsBatchingPeriod={30}
+        onScroll={(e) => {
+          const y = e.nativeEvent.contentOffset.y;
+          scrollYPagesValue.current = y;
+          scrollYPages.setValue(y);
+          setPagesContentHeight(e.nativeEvent.contentSize.height);
+        }}
+        onContentSizeChange={undefined}
         onLayout={(e) => setPagesViewHeight(e.nativeEvent.layout.height)}
         style={{ height: paginationReady ? pageHeight + 32 : 0 }}
         nestedScrollEnabled
-      >
-        <View style={styles.pagesContainer}>
-          {isDeferringMessages && (
-            <View style={styles.deferLoading}>
-              <ActivityIndicator size="small" color={colors.text || '#1a1a1a'} />
-              <Text style={[styles.deferLoadingText, { color: colors.text || '#1a1a1a' }]}>Loading selected book...</Text>
-            </View>
-          )}
-          {(() => {
-            let lastShownDate: string | null = null;
-            let lastShownYear: string | null = null;
-            let lastShownMonth: string | null = null;
-            let globalMessageIndex = 0;
-            let lastSenderName: string | null = null; // Track sender across pages
-            let lastSenderSide: boolean | null = null; // Track sender side (true/false)
-
-        return pages.slice(0, renderedPageCount).map((pageMessages, pageIndex) => {
+        contentContainerStyle={styles.pagesContainer}
+        renderItem={({ item: pageData }) => {
+          const { messages: pageMessages, pageIndex, headerState } = pageData;
           const pageElements: JSX.Element[] = [];
-          
-          // Check if we need year/month headers at start of this page.
-          // For empty header-only pages, derive the date from the next page's first message.
-          const headerSourceMsg = pageMessages.length > 0
-            ? pageMessages[0]
-            : pages[pageIndex + 1]?.[0];
-          if (headerSourceMsg && dateFormat === 'full') {
-            const firstMsg = headerSourceMsg;
-            const msgDateStr = firstMsg.date || firstMsg.sendingTime || '';
-            const yearMonth = getYearMonth(msgDateStr);
-            
-            if (yearMonth) {
-              // Year header (if year changed)
-              if (yearMonth.year !== lastShownYear) {
-                const yearTitle = customTitles.years?.[yearMonth.year];
+
+          // ── Year header ──────────────────────────────────────────────────
+          if (headerState.showYear && headerState.yearValue) {
+            const yearTitle = customTitles.years?.[headerState.yearValue];
             if (DEBUG_PREVIEW_LAYOUT) {
               debugLog('render-year-header', {
                 pageIndex: pageIndex + 1,
-                year: yearMonth.year,
+                year: headerState.yearValue,
                 hasYearSubtitle: !!yearTitle?.text,
                 yearEstimate: YEAR_HEADER_ESTIMATE,
               });
             }
-                pageElements.push(
-                  <View
-                    key={`year-${yearMonth.year}`}
-                    style={styles.yearHeader}
-                    onLayout={
-                      DEBUG_PREVIEW_LAYOUT
-                        ? (e) => {
-                            const key = `year:${pageIndex}:${yearMonth.year}`;
-                            if (debugHeaderLayoutKeysRef.current.has(key)) return;
-                            debugHeaderLayoutKeysRef.current.add(key);
-                            debugLog('header-layout-height', {
-                              pageIndex: pageIndex + 1,
-                              headerType: 'year',
-                              year: yearMonth.year,
-                              estimatedHeight: YEAR_HEADER_ESTIMATE,
-                              actualHeight: Number(e.nativeEvent.layout.height.toFixed(2)),
-                            });
-                          }
-                        : undefined
-                    }
-                  >
-                    <Text style={[styles.yearText, { fontSize: fontSize + 12, color: colors.text || '#1a1a1a' }]}>
-                      {yearMonth.year}
-                    </Text>
-                    {yearTitle?.text && (
-                      <Text 
-                        style={[
-                          styles.yearSubtitle, 
-                          { 
-                            fontSize: fontSize + 2, 
-                            color: colors.text || '#666',
-                            fontWeight: yearTitle.bold ? '700' : '400',
-                            fontStyle: yearTitle.italic ? 'italic' : 'normal',
-                          }
-                        ]}
-                      >
-                        {yearTitle.text}
-                      </Text>
-                    )}
-                  </View>
-                );
-                lastShownYear = yearMonth.year;
-                // Reset sender tracking when year changes
-                lastSenderName = null;
-                lastSenderSide = null;
-              }
-              
-              // Month header (if month changed)
-              if (yearMonth.month !== lastShownMonth) {
-                const monthTitle = customTitles.months?.[yearMonth.month];
-                const monthName = getMonthName(yearMonth.monthNum, dateLanguage);
-                if (DEBUG_PREVIEW_LAYOUT) {
-                  debugLog('render-month-header', {
-                    pageIndex: pageIndex + 1,
-                    month: yearMonth.month,
-                    monthName,
-                    hasMonthSubtitle: !!monthTitle?.text,
-                    monthEstimate: MONTH_HEADER_ESTIMATE,
-                  });
+            pageElements.push(
+              <View
+                key={`year-${headerState.yearValue}`}
+                style={styles.yearHeader}
+                onLayout={
+                  DEBUG_PREVIEW_LAYOUT
+                    ? (e) => {
+                        const key = `year:${pageIndex}:${headerState.yearValue}`;
+                        if (debugHeaderLayoutKeysRef.current.has(key)) return;
+                        debugHeaderLayoutKeysRef.current.add(key);
+                        debugLog('header-layout-height', {
+                          pageIndex: pageIndex + 1,
+                          headerType: 'year',
+                          year: headerState.yearValue,
+                          estimatedHeight: YEAR_HEADER_ESTIMATE,
+                          actualHeight: Number(e.nativeEvent.layout.height.toFixed(2)),
+                        });
+                      }
+                    : undefined
                 }
-                pageElements.push(
-                  <View
-                    key={`month-${yearMonth.month}`}
-                    style={styles.monthHeader}
-                    onLayout={
-                      DEBUG_PREVIEW_LAYOUT
-                        ? (e) => {
-                            const key = `month:${pageIndex}:${yearMonth.month}`;
-                            if (debugHeaderLayoutKeysRef.current.has(key)) return;
-                            debugHeaderLayoutKeysRef.current.add(key);
-                            debugLog('header-layout-height', {
-                              pageIndex: pageIndex + 1,
-                              headerType: 'month',
-                              month: yearMonth.month,
-                              estimatedHeight: MONTH_HEADER_ESTIMATE,
-                              actualHeight: Number(e.nativeEvent.layout.height.toFixed(2)),
-                            });
-                          }
-                        : undefined
-                    }
+              >
+                <Text style={[styles.yearText, { fontSize: fontSize + 12, color: colors.text || '#1a1a1a' }]}>
+                  {headerState.yearValue}
+                </Text>
+                {yearTitle?.text && (
+                  <Text
+                    style={[
+                      styles.yearSubtitle,
+                      {
+                        fontSize: fontSize + 2,
+                        color: colors.text || '#666',
+                        fontWeight: yearTitle.bold ? '700' : '400',
+                        fontStyle: yearTitle.italic ? 'italic' : 'normal',
+                      },
+                    ]}
                   >
-                    <Text style={[styles.monthText, { fontSize: fontSize + 6, color: colors.text || '#1a1a1a' }]}>
-                      {monthName}
-                    </Text>
-                    {monthTitle?.text && (
-                      <Text 
-                        style={[
-                          styles.monthSubtitle, 
-                          { 
-                            fontSize: fontSize, 
-                            color: colors.text || '#666',
-                            fontWeight: monthTitle.bold ? '700' : '400',
-                            fontStyle: monthTitle.italic ? 'italic' : 'normal',
-                          }
-                        ]}
-                      >
-                        {monthTitle.text}
-                      </Text>
-                    )}
-                  </View>
-                );
-                lastShownMonth = yearMonth.month;
-                // Reset sender tracking when month changes
-                lastSenderName = null;
-                lastSenderSide = null;
-              }
-            }
-
-            // For header-only pages (no messages), also render the date header
-            if (pageMessages.length === 0 && headerSourceMsg) {
-              const msgDateStr = headerSourceMsg.date || headerSourceMsg.sendingTime || '';
-              const formattedDate = formatDate(msgDateStr, dateStyle, dateLanguage);
-              if (formattedDate && formattedDate !== lastShownDate) {
-                if (DEBUG_PREVIEW_LAYOUT) {
-                  debugLog('render-date-header-only-page', {
-                    pageIndex: pageIndex + 1,
-                    formattedDate,
-                    dateEstimate: DATE_HEADER_ESTIMATE,
-                  });
-                }
-                pageElements.push(
-                  <View
-                    key={`date-header-only-${pageIndex}`}
-                    style={styles.dateHeader}
-                    onLayout={
-                      DEBUG_PREVIEW_LAYOUT
-                        ? (e) => {
-                            const key = `date-only:${pageIndex}:${formattedDate}`;
-                            if (debugHeaderLayoutKeysRef.current.has(key)) return;
-                            debugHeaderLayoutKeysRef.current.add(key);
-                            debugLog('header-layout-height', {
-                              pageIndex: pageIndex + 1,
-                              headerType: 'date',
-                              formattedDate,
-                              estimatedHeight: DATE_HEADER_ESTIMATE,
-                              actualHeight: Number(e.nativeEvent.layout.height.toFixed(2)),
-                              headerOnlyPage: true,
-                            });
-                          }
-                        : undefined
-                    }
-                  >
-                    <Text style={[styles.dateHeaderText, { fontSize: fontSize + 1, color: colors.text || '#666' }]}>
-                      {formattedDate}
-                    </Text>
-                  </View>
-                );
-                lastShownDate = formattedDate;
-                // Reset sender tracking when date changes
-                lastSenderName = null;
-                lastSenderSide = null;
-              }
-            }
+                    {yearTitle.text}
+                  </Text>
+                )}
+              </View>
+            );
           }
 
-          // Group messages if grid layout is selected
+          // ── Month header ─────────────────────────────────────────────────
+          if (headerState.showMonth && headerState.monthValue) {
+            const monthTitle = customTitles.months?.[headerState.monthValue];
+            const monthName = getMonthName(headerState.monthNum, dateLanguage);
+            if (DEBUG_PREVIEW_LAYOUT) {
+              debugLog('render-month-header', {
+                pageIndex: pageIndex + 1,
+                month: headerState.monthValue,
+                monthName,
+                hasMonthSubtitle: !!monthTitle?.text,
+                monthEstimate: MONTH_HEADER_ESTIMATE,
+              });
+            }
+            pageElements.push(
+              <View
+                key={`month-${headerState.monthValue}`}
+                style={styles.monthHeader}
+                onLayout={
+                  DEBUG_PREVIEW_LAYOUT
+                    ? (e) => {
+                        const key = `month:${pageIndex}:${headerState.monthValue}`;
+                        if (debugHeaderLayoutKeysRef.current.has(key)) return;
+                        debugHeaderLayoutKeysRef.current.add(key);
+                        debugLog('header-layout-height', {
+                          pageIndex: pageIndex + 1,
+                          headerType: 'month',
+                          month: headerState.monthValue,
+                          estimatedHeight: MONTH_HEADER_ESTIMATE,
+                          actualHeight: Number(e.nativeEvent.layout.height.toFixed(2)),
+                        });
+                      }
+                    : undefined
+                }
+              >
+                <Text style={[styles.monthText, { fontSize: fontSize + 6, color: colors.text || '#1a1a1a' }]}>
+                  {monthName}
+                </Text>
+                {monthTitle?.text && (
+                  <Text
+                    style={[
+                      styles.monthSubtitle,
+                      {
+                        fontSize: fontSize,
+                        color: colors.text || '#666',
+                        fontWeight: monthTitle.bold ? '700' : '400',
+                        fontStyle: monthTitle.italic ? 'italic' : 'normal',
+                      },
+                    ]}
+                  >
+                    {monthTitle.text}
+                  </Text>
+                )}
+              </View>
+            );
+          }
+
+          // ── Date header for header-only pages ────────────────────────────
+          if (headerState.showDate && headerState.dateValue && pageMessages.length === 0) {
+            if (DEBUG_PREVIEW_LAYOUT) {
+              debugLog('render-date-header-only-page', {
+                pageIndex: pageIndex + 1,
+                formattedDate: headerState.dateValue,
+                dateEstimate: DATE_HEADER_ESTIMATE,
+              });
+            }
+            pageElements.push(
+              <View
+                key={`date-header-only-${pageIndex}`}
+                style={styles.dateHeader}
+                onLayout={
+                  DEBUG_PREVIEW_LAYOUT
+                    ? (e) => {
+                        const key = `date-only:${pageIndex}:${headerState.dateValue}`;
+                        if (debugHeaderLayoutKeysRef.current.has(key)) return;
+                        debugHeaderLayoutKeysRef.current.add(key);
+                        debugLog('header-layout-height', {
+                          pageIndex: pageIndex + 1,
+                          headerType: 'date',
+                          formattedDate: headerState.dateValue,
+                          estimatedHeight: DATE_HEADER_ESTIMATE,
+                          actualHeight: Number(e.nativeEvent.layout.height.toFixed(2)),
+                          headerOnlyPage: true,
+                        });
+                      }
+                    : undefined
+                }
+              >
+                <Text style={[styles.dateHeaderText, { fontSize: fontSize + 1, color: colors.text || '#666' }]}>
+                  {headerState.dateValue}
+                </Text>
+              </View>
+            );
+          }
+
+          // ── Message elements ─────────────────────────────────────────────
+          // Sender tracking is local to this page, seeded from pre-computed initial state.
+          let lastSenderName: string | null = headerState.initialSenderName;
+          let lastSenderSide: boolean | null = headerState.initialSenderSide;
+          // prevDate = the last date shown before this page (so we don't re-show it for the first msg)
+          let lastShownDate: string | null = headerState.showDate ? headerState.dateValue : headerState.prevDate;
+
           const groupedMessages = (imageLayout === 'grid' || imageLayout === 'maxGrid')
             ? groupConsecutiveImages(pageMessages)
             : pageMessages.map(m => m);
@@ -1965,16 +2057,12 @@ const BookPreviewPagesComponent: React.FC<BookPreviewPagesProps> = ({
             const msg = Array.isArray(item) ? item[0] : item;
             const msgDateStr = msg.date || msg.sendingTime || '';
             const formattedDate = formatDate(msgDateStr, dateStyle, dateLanguage);
-            
-            // Show date header only if date changed and dateFormat is 'full'
+
             const showDateHeader = dateFormat === 'full' && msgDateStr && formattedDate !== lastShownDate;
-            if (showDateHeader) {
-              lastShownDate = formattedDate;
-            }
+            if (showDateHeader) lastShownDate = formattedDate;
 
             const elements: JSX.Element[] = [];
-            
-            // Add date header if needed
+
             if (showDateHeader) {
               if (DEBUG_PREVIEW_LAYOUT) {
                 debugLog('render-date-header', {
@@ -1997,7 +2085,7 @@ const BookPreviewPagesComponent: React.FC<BookPreviewPagesProps> = ({
               }
               elements.push(
                 <View
-                  key={`date-${globalMessageIndex}`}
+                  key={`date-${pageIndex}-${idx}`}
                   style={styles.dateHeader}
                   onLayout={
                     DEBUG_PREVIEW_LAYOUT
@@ -2022,39 +2110,29 @@ const BookPreviewPagesComponent: React.FC<BookPreviewPagesProps> = ({
                   </Text>
                 </View>
               );
-              // Reset sender tracking when date changes
               lastSenderName = null;
               lastSenderSide = null;
             }
-            
-            // Check if we should show sender name (WhatsApp-style grouping across pages)
+
             const currentSenderName = msg.senderName;
             const currentSenderSide = isMessageFromMe(msg.senderName || '', meName);
             const showSenderName = lastSenderName !== currentSenderName || lastSenderSide !== currentSenderSide;
-            
-            // Update tracking for next message
             lastSenderName = currentSenderName;
             lastSenderSide = currentSenderSide;
-            
-            globalMessageIndex++;
-            
-            // Check if item is a group of images
+
             const isGroup = Array.isArray(item);
-            
             if (isGroup && item.length >= 2) {
-              // Render image grid
               elements.push(renderImageGrid(item, idx, colors, meName, showTime, dateFormat, fontSize, imageLayout));
               return <React.Fragment key={`msg-group-${idx}`}>{elements}</React.Fragment>;
             }
-            
-            // Single message (text or single image)
+
             const isSender = isMessageFromMe(msg.senderName || '', meName);
             const displayName =
               layout.senderLabelStyle === 'initial' && msg.senderName
                 ? msg.senderName.charAt(0).toUpperCase()
                 : msg.senderName;
-            const timeContent = showTime && dateFormat === 'full' 
-              ? msg.sendingTime || '' 
+            const timeContent = showTime && dateFormat === 'full'
+              ? msg.sendingTime || ''
               : showTime && dateFormat === 'timeOnly'
               ? (msg.sendingTime || '').split(',').pop()?.trim() || msg.sendingTime || ''
               : '';
@@ -2064,8 +2142,6 @@ const BookPreviewPagesComponent: React.FC<BookPreviewPagesProps> = ({
             const isAudio = msg.messageType === 'audio';
             const rawMedia = (msg as any).url || (msg as any).localPath;
             let imageUri: string | undefined;
-            
-            // For videos, use thumbnailUrl if available, otherwise fall back to video URL
             if (isVideo && (msg as any).thumbnailUrl) {
               imageUri = (msg as any).thumbnailUrl;
             } else if (typeof rawMedia === 'string' && rawMedia.length > 0) {
@@ -2082,14 +2158,10 @@ const BookPreviewPagesComponent: React.FC<BookPreviewPagesProps> = ({
             }
             const isVideoOrAudio = isVideo || isAudio;
             const displayText = stripMediaTitleLine(text, isVideoOrAudio);
-            const showText = isImage
-              ? !imageUri
-              : isVideoOrAudio
-              ? displayText.length > 0
-              : true;
+            const showText = isImage ? !imageUri : isVideoOrAudio ? displayText.length > 0 : true;
             const imageOnly = isImage && imageUri && !showText;
             const isMedia = msg.messageType === 'image' || msg.messageType === 'video';
-            const hideSenderName = isMedia || !showSenderName; // Hide if media OR if same sender as previous
+            const hideSenderName = isMedia || !showSenderName;
 
             elements.push(
               <View
@@ -2183,9 +2255,7 @@ const BookPreviewPagesComponent: React.FC<BookPreviewPagesProps> = ({
                       style={[
                         styles.senderName,
                         {
-                          color: isSender
-                            ? colors.senderText || '#FFFFFF'
-                            : colors.receiverText || '#FFFFFF',
+                          color: isSender ? colors.senderText || '#FFFFFF' : colors.receiverText || '#FFFFFF',
                           fontSize: fontSize - 1,
                         },
                       ]}
@@ -2199,9 +2269,7 @@ const BookPreviewPagesComponent: React.FC<BookPreviewPagesProps> = ({
                       style={[
                         styles.messageText,
                         {
-                          color: isSender
-                            ? colors.senderText || '#FFFFFF'
-                            : colors.receiverText || '#FFFFFF',
+                          color: isSender ? colors.senderText || '#FFFFFF' : colors.receiverText || '#FFFFFF',
                           fontSize,
                           lineHeight: fontSize * lineHeight,
                           fontFamily,
@@ -2226,11 +2294,7 @@ const BookPreviewPagesComponent: React.FC<BookPreviewPagesProps> = ({
                         <View style={styles.videoThumbnailContainer}>
                           {imageUri ? (
                             <>
-                              <Image
-                                source={{ uri: imageUri }}
-                                style={styles.videoThumbnail}
-                                resizeMode="cover"
-                              />
+                              <Image source={{ uri: imageUri }} style={styles.videoThumbnail} resizeMode="cover" />
                               <View style={styles.playIconOverlay}>
                                 <Text style={styles.playIcon}>▶</Text>
                               </View>
@@ -2244,11 +2308,7 @@ const BookPreviewPagesComponent: React.FC<BookPreviewPagesProps> = ({
                       ) : null}
                       <View style={styles.qrCodeSection}>
                         {(msg as any).qrUrl ? (
-                          <Image
-                            source={{ uri: (msg as any).qrUrl }}
-                            style={styles.qrImage}
-                            resizeMode="contain"
-                          />
+                          <Image source={{ uri: (msg as any).qrUrl }} style={styles.qrImage} resizeMode="contain" />
                         ) : (
                           <View style={[styles.qrImage, { justifyContent: 'center', alignItems: 'center', backgroundColor: '#f0f0f0', borderRadius: 8 }]}>
                             <Text style={{ fontSize: 28 }}>{isAudio ? '🎵' : '🎬'}</Text>
@@ -2268,9 +2328,7 @@ const BookPreviewPagesComponent: React.FC<BookPreviewPagesProps> = ({
                         style={[
                           styles.messageTime,
                           {
-                            color: isSender
-                              ? colors.senderText || '#FFFFFF'
-                              : colors.receiverText || '#FFFFFF',
+                            color: isSender ? colors.senderText || '#FFFFFF' : colors.receiverText || '#FFFFFF',
                             fontSize: fontSize - 2,
                           },
                         ]}
@@ -2282,13 +2340,12 @@ const BookPreviewPagesComponent: React.FC<BookPreviewPagesProps> = ({
                 </View>
               </View>
             );
-            
+
             return <React.Fragment key={`msg-${idx}`}>{elements}</React.Fragment>;
           });
 
           return (
             <View
-              key={`page-${pageIndex}`}
               style={[
                 styles.page,
                 {
@@ -2297,7 +2354,7 @@ const BookPreviewPagesComponent: React.FC<BookPreviewPagesProps> = ({
                   backgroundColor: colors.background || '#ECE5DD',
                   paddingHorizontal: 12,
                   paddingVertical: 16,
-                  paddingBottom: 24, // extra bottom room so last message never touches the edge
+                  paddingBottom: 24,
                   overflow: 'hidden',
                 },
               ]}
@@ -2307,7 +2364,7 @@ const BookPreviewPagesComponent: React.FC<BookPreviewPagesProps> = ({
                   DEBUG_PREVIEW_LAYOUT
                     ? (e) => {
                         const contentHeight = e.nativeEvent.layout.height;
-                        const innerAvailableHeight = pageHeight - 16 - 24; // page paddingTop + paddingBottom in render
+                        const innerAvailableHeight = pageHeight - 16 - 24;
                         const estimatedHeight = debugEstimatedPageHeights[pageIndex];
                         const exceeds = contentHeight - innerAvailableHeight;
                         const hasMediaOnPage = pageMessages.some(
@@ -2365,10 +2422,8 @@ const BookPreviewPagesComponent: React.FC<BookPreviewPagesProps> = ({
               )}
             </View>
           );
-        });
-      })()}
-        </View>
-      </ScrollView>
+        }}
+      />
 
       {/* Custom scrollbar — only visible when content overflows and pages are ready */}
       {paginationReady && pagesContentHeight > pagesViewHeight && (
@@ -2379,12 +2434,13 @@ const BookPreviewPagesComponent: React.FC<BookPreviewPagesProps> = ({
             setTrackLayout({ y, height });
           }}
           onPress={(e) => {
+            // Suppress onPress if this tap was actually the end of a thumb drag
+            if (isDraggingThumb.current) return;
             if (trackLayout.height <= 0 || thumbTravel <= 0) return;
-            setSeekMode(true);
             const tapY = Math.max(0, Math.min(e.nativeEvent.locationY, trackLayout.height));
             const ratio = tapY / trackLayout.height;
             const newOffset = ratio * maxScrollOffset;
-            pagesScrollRef.current?.scrollTo({ y: newOffset, animated: true });
+            pagesScrollRef.current?.scrollToOffset({ offset: newOffset, animated: true });
           }}
           style={styles.scrollbarTrack}
         >

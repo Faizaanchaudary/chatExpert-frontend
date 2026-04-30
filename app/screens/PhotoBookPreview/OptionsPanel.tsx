@@ -153,6 +153,7 @@ export const OptionsPanel: React.FC<OptionsPanelProps> = ({
         ))}
       </View>
 
+      {/* Text size option hidden
       <Text style={styles.label}>Text size</Text>
       <View style={styles.row}>
         {[9, 10, 11, 12, 14, 16].map((size) => (
@@ -172,6 +173,7 @@ export const OptionsPanel: React.FC<OptionsPanelProps> = ({
           </TouchableOpacity>
         ))}
       </View>
+      */}
 
       <Text style={styles.label}>Font family</Text>
       <View style={styles.row}>
